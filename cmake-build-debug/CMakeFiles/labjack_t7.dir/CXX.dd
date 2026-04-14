@@ -1,0 +1,7 @@
+ninja_dyndep_version = 1.0
+build CMakeFiles\labjack_t7.dir\engine\src\labjack_t7_controller.cpp.obj: dyndep
+
+build CMakeFiles\labjack_t7.dir\engine\src\labjack_t7_module.cpp.obj: dyndep
+
+build CMakeFiles\labjack_t7.dir\engine\src\labjack_t7_plugin.cpp.obj: dyndep
+

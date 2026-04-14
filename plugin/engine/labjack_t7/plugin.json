@@ -1,0 +1,9 @@
+{
+  "id": "labjack_t7",
+  "name": "LabJack T7 Plugin",
+  "version": "0.1.0",
+  "engine_plugins_api_version": 2,
+  "interface_plugins_api_version": 1,
+  "contains_engine_plugin": true,
+  "contains_interface_plugin": true
+}

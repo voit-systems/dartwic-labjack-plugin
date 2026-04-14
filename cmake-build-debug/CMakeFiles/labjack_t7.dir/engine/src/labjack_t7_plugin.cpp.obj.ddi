@@ -1,0 +1,14 @@
+{
+    "version": 1,
+    "revision": 0,
+    "rules": [
+        {
+            "primary-output": "CMakeFiles\\labjack_t7.dir\\engine\\src\\labjack_t7_plugin.cpp.obj",
+            "outputs": [
+                "C:\\Users\\kempt\\OneDrive\\Documents\\Github\\Repositories\\dartwic-labjack-plugin\\cmake-build-debug\\vc140.pdb",
+                "CMakeFiles\\labjack_t7.dir\\engine\\src\\labjack_t7_plugin.cpp.obj.ddi"
+            ],
+            "requires": []
+        }
+    ]
+}

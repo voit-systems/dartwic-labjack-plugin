@@ -1,0 +1,17 @@
+# ninja log v6
+2	38	7978897147111388	C:/Users/kempt/OneDrive/Documents/Github/Repositories/dartwic-labjack-plugin/cmake-build-debug/CMakeFiles/cmake.verify_globs	3500810bd2a4024f
+39	7917	7978897223378211	build.ninja	94f1f41a4b0758bd
+126	184	7978897227534169	C:/Users/kempt/OneDrive/Documents/Github/Repositories/dartwic-labjack-plugin/cmake-build-debug/CMakeFiles/cmake.verify_globs	3500810bd2a4024f
+207	831	7978897228411514	CMakeFiles/labjack_t7.dir/engine/src/labjack_t7_module.cpp.obj.ddi	2057f312f2b05058
+192	837	7978897228179864	CMakeFiles/labjack_t7.dir/engine/src/labjack_t7_controller.cpp.obj.ddi	2000b265e561e316
+221	841	7978897228508298	CMakeFiles/labjack_t7.dir/engine/src/labjack_t7_plugin.cpp.obj.ddi	acf868fce578ccd0
+842	998	7978897236159883	CMakeFiles/labjack_t7.dir/CXX.dd	e5eb37e8e98d3578
+842	998	7978897236159883	C:/Users/kempt/OneDrive/Documents/Github/Repositories/dartwic-labjack-plugin/cmake-build-debug/CMakeFiles/labjack_t7.dir/CXXModules.json	e5eb37e8e98d3578
+842	998	7978897236159883	CMakeFiles/labjack_t7.dir/engine/src/labjack_t7_controller.cpp.obj.modmap	e5eb37e8e98d3578
+842	998	7978897236159883	CMakeFiles/labjack_t7.dir/engine/src/labjack_t7_module.cpp.obj.modmap	e5eb37e8e98d3578
+842	998	7978897236159883	CMakeFiles/labjack_t7.dir/engine/src/labjack_t7_plugin.cpp.obj.modmap	e5eb37e8e98d3578
+1022	6858	7978897236506454	CMakeFiles/labjack_t7.dir/engine/src/labjack_t7_module.cpp.obj	6a8353ce5cc09100
+1033	7750	7978897236652118	CMakeFiles/labjack_t7.dir/engine/src/labjack_t7_plugin.cpp.obj	893edf329a4fe80f
+1011	8288	7978897236407248	CMakeFiles/labjack_t7.dir/engine/src/labjack_t7_controller.cpp.obj	8d0280c35f230c4d
+8288	10715	7978897317447793	C:/Users/kempt/OneDrive/Documents/Github/Repositories/dartwic-labjack-plugin/plugin/engine/labjack_t7/bin/labjack_t7.dll	cb8903735c7e0ac7
+8288	10715	7978897317447793	labjack_t7.lib	cb8903735c7e0ac7
