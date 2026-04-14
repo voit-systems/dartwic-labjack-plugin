@@ -92,6 +92,10 @@ if(SHOULD_COPY_PLUGIN AND NOT "${EXTERNAL_ENGINE_ROOT}" STREQUAL "")
     set(EXTERNAL_ENGINE_PLUGIN_DIR "${EXTERNAL_ENGINE_ROOT}/plugins/${ENGINE_PLUGIN_ID}")
     add_custom_command(TARGET labjack_t7 POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E make_directory "${EXTERNAL_ENGINE_ROOT}/plugins"
-            COMMAND ${CMAKE_COMMAND} -E copy_directory "${ENGINE_PLUGIN_DIR}" "${EXTERNAL_ENGINE_PLUGIN_DIR}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${EXTERNAL_ENGINE_PLUGIN_DIR}/bin"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${ENGINE_PLUGIN_DIR}/plugin.json" "${EXTERNAL_ENGINE_PLUGIN_DIR}/plugin.json"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${ENGINE_PLUGIN_DIR}/module_config.json" "${EXTERNAL_ENGINE_PLUGIN_DIR}/module_config.json"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${ENGINE_PLUGIN_DIR}/default_parameters.json" "${EXTERNAL_ENGINE_PLUGIN_DIR}/default_parameters.json"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:labjack_t7>" "${EXTERNAL_ENGINE_PLUGIN_DIR}/bin/$<TARGET_FILE_NAME:labjack_t7>"
             COMMENT "Copying engine plugin to external DARTWIC engine plugins directory")
 endif()

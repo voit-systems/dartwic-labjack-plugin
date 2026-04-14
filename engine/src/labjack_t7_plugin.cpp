@@ -17,7 +17,12 @@ void LabJackT7Plugin::onPluginLoaded() {
     digital_write_task.metadata.expected_plugin_id = "labjack_t7";
     digital_write_task.metadata.default_arguments = {
         {"module_instance_name", ""},
-        {"channels", nlohmann::json::array({"DIO8", "DIO9", "DIO10", "DIO11"})}
+        {"mappings", nlohmann::json::array({
+            {
+                {"register", 0},
+                {"channel", ""}
+            }
+        })}
     };
     digital_write_task.on_task = [this](const DARTWIC::API::TaskTypeDefinition&, DARTWIC::API::TaskRuntime& task_runtime, double) {
         const std::string instance_name = task_runtime.getArguments().value("module_instance_name", std::string{});
@@ -39,9 +44,15 @@ void LabJackT7Plugin::onPluginLoaded() {
     stream_task.metadata.expected_plugin_id = "labjack_t7";
     stream_task.metadata.default_arguments = {
         {"module_instance_name", ""},
-        {"channels", "AIN0, AIN1"},
         {"target_scan_rate", 100.0},
-        {"scans_per_read", 10}
+        {"scans_per_read", 10},
+        {"mappings", nlohmann::json::array({
+            {
+                {"channel_type", "analog"},
+                {"register", 0},
+                {"channel", ""}
+            }
+        })}
     };
     stream_task.on_task = [this](const DARTWIC::API::TaskTypeDefinition&, DARTWIC::API::TaskRuntime& task_runtime, double) {
         const std::string instance_name = task_runtime.getArguments().value("module_instance_name", std::string{});
@@ -57,7 +68,7 @@ void LabJackT7Plugin::onPluginLoaded() {
         auto module = dartwic->getModuleInstance(instance_name);
         auto labjack_module = std::dynamic_pointer_cast<LabJackT7Module>(module);
         if (labjack_module) {
-            labjack_module->controller().stopStream();
+            labjack_module->controller().stopStream(task_runtime);
         }
     };
     stream_task.cleanup = [](DARTWIC::API::TaskRuntime&) {};

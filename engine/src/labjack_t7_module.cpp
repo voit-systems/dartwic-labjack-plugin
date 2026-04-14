@@ -10,8 +10,7 @@ LabJackT7Module::LabJackT7Module(nlohmann::json cfg, DARTWIC::API::SDK_API* drtw
         instance_name_,
         getParameter<std::string>("device_type", "T7"),
         getParameter<std::string>("connection_type", "ANY"),
-        getParameter<std::string>("identifier", "ANY"),
-        getParameter<std::string>("default_stream_channels", "AIN0, AIN1")
+        getParameter<std::string>("identifier", "ANY")
     );
 }
 

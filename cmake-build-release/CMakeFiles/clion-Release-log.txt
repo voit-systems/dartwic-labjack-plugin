@@ -19,14 +19,8 @@ For more information, see the docs here:
     
     https://json.nlohmann.me/api/macros/json_use_implicit_conversions/
 
-All requested installations completed successfully in: 3.16 ms
+All requested installations completed successfully in: 2.45 ms
 -- Running vcpkg install - done
--- Configuring done (5.9s)
+-- Configuring done (6.0s)
 -- Generating done (0.1s)
-CMake Warning:
-  Manually-specified variables were not used by the project:
-
-    CMAKE_TOOLCHAIN_FILE
-
-
 -- Build files have been written to: C:/Users/kempt/OneDrive/Documents/Github/Repositories/dartwic-labjack-plugin/cmake-build-release

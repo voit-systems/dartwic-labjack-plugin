@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -19,8 +20,7 @@ public:
         std::string instance_name,
         std::string device_type,
         std::string connection_type,
-        std::string identifier,
-        std::string default_stream_channels
+        std::string identifier
     );
     ~LabJackT7Controller();
 
@@ -28,13 +28,32 @@ public:
     void applyDigitalWrite(const nlohmann::json& arguments);
     void runStreamWorker(DARTWIC::API::TaskRuntime& task_runtime);
     void stopStream();
+    void stopStream(DARTWIC::API::TaskRuntime& task_runtime);
 
 private:
+    struct RapidChannel {
+        std::string portal;
+        std::string channel;
+    };
+
+    struct StreamMapping {
+        std::string labjack_name;
+        RapidChannel destination;
+        int address = 0;
+    };
+
+    struct DigitalWriteMapping {
+        std::string labjack_name;
+        RapidChannel source;
+        RapidChannel state;
+    };
+
     double query(const std::string& channel, double default_value = 0.0) const;
-    void insert(const std::string& channel, DARTWIC::API::ChannelValue value) const;
+    double query(const RapidChannel& channel, double default_value = 0.0) const;
     void upsert(const std::string& channel, DARTWIC::API::ChannelValue value) const;
-    void upsertBulk(const std::string& channel, const std::vector<std::pair<double, uint64_t>>& data) const;
-    void consoleError(const std::string& title, const std::string& description, std::vector<std::string> channels, const std::string& resolution, int auto_ack = 5) const;
+    void upsert(const RapidChannel& channel, DARTWIC::API::ChannelValue value) const;
+    void upsertBulk(const RapidChannel& channel, const std::vector<std::pair<double, uint64_t>>& data) const;
+    void consoleError(const std::string& title, const std::string& description, std::vector<std::string> channels, const std::string& resolution, int auto_ack = 0) const;
 
     void connectionLoopStart();
     void connectionLoop();
@@ -44,9 +63,16 @@ private:
     void verifyConnection();
     void handleError(int error_number, const std::string& operation);
 
-    std::vector<std::string> parseChannelList(const nlohmann::json& arguments) const;
-    std::vector<std::string> splitCommaSeparated(const std::string& input) const;
-    std::vector<int> resolveAddresses(const std::vector<std::string>& channels);
+    std::optional<RapidChannel> parseRapidChannel(const nlohmann::json& value) const;
+    std::optional<RapidChannel> splitRapidChannelPath(const std::string& channel_path) const;
+    std::string buildStreamLabJackName(const nlohmann::json& mapping) const;
+    std::string buildDigitalLabJackName(const nlohmann::json& mapping) const;
+    std::vector<StreamMapping> parseStreamMappings(const nlohmann::json& arguments);
+    std::vector<DigitalWriteMapping> parseDigitalWriteMappings(const nlohmann::json& arguments) const;
+    void publishTaskDiagnostic(DARTWIC::API::TaskRuntime& task_runtime, const std::string& suffix, DARTWIC::API::ChannelValue value) const;
+    bool tryAcquireStream(const std::string& task_key);
+    void releaseStream(const std::string& task_key);
+    void stopStreamTaskKey(const std::string& task_key);
     uint64_t unixNanosecondsNow() const;
 
     LabJackT7Module* module_ = nullptr;
@@ -54,13 +80,12 @@ private:
     std::string device_type_;
     std::string connection_type_;
     std::string identifier_;
-    std::string default_stream_channels_;
     std::string connection_loop_name_;
     std::atomic_bool demo_mode_{false};
     std::atomic_bool connected_{false};
-    std::atomic_bool stream_running_{false};
     std::mutex handle_mutex_;
     std::mutex stream_mutex_;
+    std::string active_stream_task_key_;
     int handle_ = -1;
 };
 
