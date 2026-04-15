@@ -7,6 +7,9 @@ const streamDiagnosticSuffixes = [
     "_stream_target_scan_rate",
     "_stream_scans_per_read",
     "_stream_actual_scan_rate",
+    "_stream_expected_read_rate",
+    "_stream_worker_read_rate",
+    "_stream_last_read_ms",
     "_stream_device_scan_backlog",
     "_stream_ljm_scan_backlog",
     "_stream_read_number"
@@ -87,6 +90,9 @@ export function createModuleUiPlugin(host) {
             Number(task.arguments?.scans_per_read ?? 10)
         );
         const actualScanRate = readTelemetryValue(liveChannels, taskChannel(task, "_stream_actual_scan_rate"));
+        const expectedReadRate = readTelemetryValue(liveChannels, taskChannel(task, "_stream_expected_read_rate"));
+        const workerReadRate = readTelemetryValue(liveChannels, taskChannel(task, "_stream_worker_read_rate"));
+        const lastReadMs = readTelemetryValue(liveChannels, taskChannel(task, "_stream_last_read_ms"));
         const deviceScanBacklog = readTelemetryValue(liveChannels, taskChannel(task, "_stream_device_scan_backlog"), 0);
         const ljmScanBacklog = readTelemetryValue(liveChannels, taskChannel(task, "_stream_ljm_scan_backlog"), 0);
 
@@ -94,6 +100,11 @@ export function createModuleUiPlugin(host) {
             ["Target Scan", targetScanRate === null ? "N/A" : `${targetScanRate.toFixed(2)} Hz`],
             ["Scans/Read", scansPerRead === null ? "N/A" : String(scansPerRead)],
             ["Actual Scan", actualScanRate === null ? "N/A" : `${actualScanRate.toFixed(2)} Hz`]
+        ];
+        const workerMetrics = [
+            ["Expected Reads", expectedReadRate === null ? "N/A" : `${expectedReadRate.toFixed(2)} Hz`],
+            ["Worker Reads", workerReadRate === null ? "N/A" : `${workerReadRate.toFixed(2)} Hz`],
+            ["Last Read", lastReadMs === null ? "N/A" : `${lastReadMs.toFixed(2)} ms`]
         ];
         const backlogMetrics = [
             ["Device Backlog", deviceScanBacklog === null ? "N/A" : String(deviceScanBacklog)],
@@ -113,6 +124,9 @@ export function createModuleUiPlugin(host) {
             <div className="space-y-2">
                 <div className="grid grid-cols-3 gap-2">
                     {scanMetrics.map(renderMetric)}
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                    {workerMetrics.map(renderMetric)}
                 </div>
                 <div className="grid grid-cols-2 gap-2">
                     {backlogMetrics.map(renderMetric)}

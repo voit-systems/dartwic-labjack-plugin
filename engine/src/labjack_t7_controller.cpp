@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cctype>
 #include <cstring>
+#include <iostream>
 #include <random>
 #include <sstream>
 #include <thread>
@@ -397,6 +398,7 @@ void LabJackT7Controller::runStreamWorker(DARTWIC::API::TaskRuntime& task_runtim
     int device_backlog = 0;
     int ljm_backlog = 0;
     int read_number = 0;
+    int reads_since_rate_publish = 0;
 
     publishTaskDiagnostic(task_runtime, "_stream_target_scan_rate", scan_rate);
     publishTaskDiagnostic(task_runtime, "_stream_scans_per_read", static_cast<double>(scans_per_read));
@@ -425,12 +427,17 @@ void LabJackT7Controller::runStreamWorker(DARTWIC::API::TaskRuntime& task_runtim
     }
 
     publishTaskDiagnostic(task_runtime, "_stream_actual_scan_rate", scan_rate);
+    publishTaskDiagnostic(task_runtime, "_stream_expected_read_rate", scan_rate / static_cast<double>(scans_per_read));
+    publishTaskDiagnostic(task_runtime, "_stream_worker_read_rate", 0.0);
+    publishTaskDiagnostic(task_runtime, "_stream_last_read_ms", 0.0);
 
     std::mt19937 rng(std::random_device{}());
     std::uniform_real_distribution<double> demo_distribution(0.0, 10.0);
     const auto stream_start = unixNanosecondsNow();
+    auto rate_window_start = std::chrono::steady_clock::now();
 
     while (!task_runtime.isStopRequested()) {
+        const auto read_start = std::chrono::steady_clock::now();
         int error = LJME_NOERROR;
         if (demo_mode_) {
             for (auto& value : data) {
@@ -441,6 +448,8 @@ void LabJackT7Controller::runStreamWorker(DARTWIC::API::TaskRuntime& task_runtim
             std::lock_guard<std::mutex> handle_lock(handle_mutex_);
             error = LJM_eStreamRead(handle_, data.data(), &device_backlog, &ljm_backlog);
         }
+        const auto read_end = std::chrono::steady_clock::now();
+        const double last_read_ms = std::chrono::duration<double, std::milli>(read_end - read_start).count();
 
         if (error != LJME_NOERROR) {
             handleError(error, "stream_read");
@@ -448,6 +457,7 @@ void LabJackT7Controller::runStreamWorker(DARTWIC::API::TaskRuntime& task_runtim
         }
 
         ++read_number;
+        ++reads_since_rate_publish;
         std::unordered_map<std::string, std::vector<std::pair<double, uint64_t>>> grouped;
         std::unordered_map<std::string, RapidChannel> grouped_channels;
         for (int scan_index = 0; scan_index < scans_per_read; ++scan_index) {
@@ -469,6 +479,19 @@ void LabJackT7Controller::runStreamWorker(DARTWIC::API::TaskRuntime& task_runtim
         publishTaskDiagnostic(task_runtime, "_stream_device_scan_backlog", static_cast<double>(device_backlog));
         publishTaskDiagnostic(task_runtime, "_stream_ljm_scan_backlog", static_cast<double>(ljm_backlog));
         publishTaskDiagnostic(task_runtime, "_stream_read_number", static_cast<double>(read_number));
+
+        const auto rate_window_end = std::chrono::steady_clock::now();
+        const double rate_window_seconds = std::chrono::duration<double>(rate_window_end - rate_window_start).count();
+        if (rate_window_seconds >= 1.0) {
+            publishTaskDiagnostic(
+                task_runtime,
+                "_stream_worker_read_rate",
+                static_cast<double>(reads_since_rate_publish) / rate_window_seconds
+            );
+            publishTaskDiagnostic(task_runtime, "_stream_last_read_ms", last_read_ms);
+            reads_since_rate_publish = 0;
+            rate_window_start = rate_window_end;
+        }
     }
 
     if (!demo_mode_) {
