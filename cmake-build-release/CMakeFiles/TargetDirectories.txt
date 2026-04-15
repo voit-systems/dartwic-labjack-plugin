@@ -1,3 +1,0 @@
-C:/Users/kempt/OneDrive/Documents/Github/Repositories/dartwic-labjack-plugin/cmake-build-release/CMakeFiles/labjack_t7.dir
-C:/Users/kempt/OneDrive/Documents/Github/Repositories/dartwic-labjack-plugin/cmake-build-release/CMakeFiles/edit_cache.dir
-C:/Users/kempt/OneDrive/Documents/Github/Repositories/dartwic-labjack-plugin/cmake-build-release/CMakeFiles/rebuild_cache.dir

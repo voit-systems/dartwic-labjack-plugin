@@ -1,6 +1,0 @@
-{
-  "name": "labjack_t7",
-  "title": "LabJack T7",
-  "icon": "https://labjack.com/cdn/shop/files/LabJack_Logo_fa79278b-4a0c-4e5e-8ed7-dff9ad5b8dbb.png?v=1656709585&width=180",
-  "description": "Creates a LabJack T7 device instance for digital writes and worker-based hardware streaming."
-}
