@@ -2,3 +2,5 @@
 cmake-*
 plugin
 node_modules
+
+build-configuration.json
