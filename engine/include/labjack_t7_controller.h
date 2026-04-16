@@ -70,6 +70,9 @@ private:
     std::vector<StreamMapping> parseStreamMappings(const nlohmann::json& arguments);
     std::vector<DigitalWriteMapping> parseDigitalWriteMappings(const nlohmann::json& arguments) const;
     void publishTaskDiagnostic(DARTWIC::API::TaskRuntime& task_runtime, const std::string& suffix, DARTWIC::API::ChannelValue value) const;
+    void configureObserveOnlyChannel(const std::string& portal, const std::string& channel, const std::string& controller) const;
+    void configureStreamChannelFields(const std::vector<StreamMapping>& mappings, double stale_timeout_seconds, const std::string& controller) const;
+    void markDisconnectedFromStreamError();
     bool tryAcquireStream(const std::string& task_key);
     void releaseStream(const std::string& task_key);
     void stopStreamTaskKey(const std::string& task_key);

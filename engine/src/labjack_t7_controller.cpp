@@ -13,10 +13,19 @@
 
 using DARTWIC::API::ChannelField;
 using DARTWIC::API::ChannelValue;
+using DARTWIC::API::ControlPolicy;
+using DARTWIC::API::RecordMode;
 
 namespace {
+    constexpr int LJM_DEVICE_STREAM_IS_ACTIVE = 2605;
+    constexpr int LJM_DEVICE_STREAM_NOT_RUNNING = 2620;
+
     std::string taskKey(DARTWIC::API::TaskRuntime& task_runtime) {
         return task_runtime.getPortalName() + "/" + task_runtime.getTaskName();
+    }
+
+    std::string taskController(DARTWIC::API::TaskRuntime& task_runtime) {
+        return "task:" + taskKey(task_runtime);
     }
 
     std::string stateChannelName(const std::string& channel) {
@@ -39,6 +48,29 @@ namespace {
     bool isDemoModeToken(const std::string& value) {
         const auto normalized = trimAndUpper(value);
         return normalized == LJM_DEMO_MODE || normalized == "LJM_DEMO_MODE";
+    }
+
+    bool errorTextContains(int error_number, const std::string& needle) {
+        char error_string[LJM_MAX_NAME_SIZE] = "LJM error not found.";
+        LJM_ErrorToString(error_number, error_string);
+        auto text = trimAndUpper(error_string);
+        auto expected = trimAndUpper(needle);
+        return text.find(expected) != std::string::npos;
+    }
+
+    bool isStreamAlreadyStartedError(int error_number) {
+        return error_number == LJM_DEVICE_STREAM_IS_ACTIVE ||
+            errorTextContains(error_number, "STREAM_IS_ACTIVE") ||
+            errorTextContains(error_number, "already");
+    }
+
+    bool isHarmlessStreamStopError(int error_number) {
+        return error_number == LJME_NOERROR ||
+            error_number == LJME_STREAM_NOT_INITIALIZED ||
+            error_number == LJME_STREAM_NOT_RUNNING ||
+            error_number == LJM_DEVICE_STREAM_NOT_RUNNING ||
+            errorTextContains(error_number, "STREAM_NOT_RUNNING") ||
+            errorTextContains(error_number, "not running");
     }
 }
 
@@ -82,6 +114,8 @@ void LabJackT7Controller::upsert(const std::string& channel, ChannelValue value)
 
 void LabJackT7Controller::upsert(const RapidChannel& channel, ChannelValue value) const {
     module_->dartwic->upsertChannelField(channel.portal, channel.channel, ChannelField::VALUE, std::move(value));
+    module_->dartwic->upsertChannelField(channel.portal, channel.channel, ChannelField::STALE_TIMEOUT, 1.0);
+    module_->dartwic->upsertChannelField(channel.portal, channel.channel, ChannelField::CONTROL_POLICY, ControlPolicy::ObserveOnly);
 }
 
 void LabJackT7Controller::upsertBulk(const RapidChannel& channel, const std::vector<std::pair<double, uint64_t>>& data) const {
@@ -123,6 +157,12 @@ void LabJackT7Controller::connectionLoopEnd() {
 
 int LabJackT7Controller::connect() {
     std::lock_guard<std::mutex> lock(handle_mutex_);
+    if (handle_ != -1) {
+        connected_ = true;
+        upsert("device_connected", 1.0);
+        return LJME_NOERROR;
+    }
+
     demo_mode_ =
         isDemoModeToken(identifier_) ||
         isDemoModeToken(device_type_) ||
@@ -163,7 +203,16 @@ void LabJackT7Controller::verifyConnection() {
     }
 
     double value = 0.0;
-    const int error = LJM_eReadName(handle_, "SERIAL_NUMBER", &value);
+    int error = LJME_NOERROR;
+    {
+        std::lock_guard<std::mutex> lock(handle_mutex_);
+        if (handle_ == -1) {
+            connected_ = false;
+            upsert("device_connected", 0.0);
+            return;
+        }
+        error = LJM_eReadName(handle_, "SERIAL_NUMBER", &value);
+    }
     if (error == LJME_NOERROR) {
         connected_ = true;
         upsert("device_connected", 1.0);
@@ -172,6 +221,13 @@ void LabJackT7Controller::verifyConnection() {
 
     connected_ = false;
     upsert("device_connected", 0.0);
+    {
+        std::lock_guard<std::mutex> lock(handle_mutex_);
+        if (handle_ != -1) {
+            LJM_Close(handle_);
+            handle_ = -1;
+        }
+    }
     handleError(error, "verify_connection");
 }
 
@@ -284,12 +340,41 @@ void LabJackT7Controller::publishTaskDiagnostic(
     const std::string& suffix,
     ChannelValue value
 ) const {
-    module_->dartwic->upsertChannelField(
-        task_runtime.getPortalName(),
-        task_runtime.getTaskName() + suffix,
-        ChannelField::VALUE,
-        std::move(value)
-    );
+    const auto channel = task_runtime.getTaskName() + suffix;
+    module_->dartwic->upsertChannelField(task_runtime.getPortalName(), channel, ChannelField::VALUE, std::move(value));
+    configureObserveOnlyChannel(task_runtime.getPortalName(), channel, taskController(task_runtime));
+}
+
+void LabJackT7Controller::configureObserveOnlyChannel(
+    const std::string& portal,
+    const std::string& channel,
+    const std::string& controller
+) const {
+    module_->dartwic->upsertChannelField(portal, channel, ChannelField::CONTROL_OWNER, controller);
+    module_->dartwic->upsertChannelField(portal, channel, ChannelField::ACTIVE_CONTROLLER, controller);
+    module_->dartwic->upsertChannelField(portal, channel, ChannelField::CONTROL_POLICY, ControlPolicy::ObserveOnly);
+}
+
+void LabJackT7Controller::configureStreamChannelFields(
+    const std::vector<StreamMapping>& mappings,
+    double stale_timeout_seconds,
+    const std::string& controller
+) const {
+    for (const auto& mapping : mappings) {
+        module_->dartwic->upsertChannelField(mapping.destination.portal, mapping.destination.channel, ChannelField::STALE_TIMEOUT, stale_timeout_seconds);
+        module_->dartwic->upsertChannelField(mapping.destination.portal, mapping.destination.channel, ChannelField::RECORD_MODE, RecordMode::EveryValue);
+        configureObserveOnlyChannel(mapping.destination.portal, mapping.destination.channel, controller);
+    }
+}
+
+void LabJackT7Controller::markDisconnectedFromStreamError() {
+    std::lock_guard<std::mutex> lock(handle_mutex_);
+    if (handle_ != -1) {
+        LJM_Close(handle_);
+        handle_ = -1;
+    }
+    connected_ = false;
+    upsert("device_connected", 0.0);
 }
 
 bool LabJackT7Controller::tryAcquireStream(const std::string& task_key) {
@@ -388,6 +473,11 @@ void LabJackT7Controller::runStreamWorker(DARTWIC::API::TaskRuntime& task_runtim
         scan_rate = 100.0;
     }
 
+    const std::string controller = taskController(task_runtime);
+    const double reads_per_second = scan_rate / static_cast<double>(scans_per_read);
+    const double stale_timeout_seconds = std::max(1.0, 2.0 / reads_per_second);
+    configureStreamChannelFields(mappings, stale_timeout_seconds, controller);
+
     std::vector<int> addresses;
     addresses.reserve(mappings.size());
     for (const auto& mapping : mappings) {
@@ -402,60 +492,121 @@ void LabJackT7Controller::runStreamWorker(DARTWIC::API::TaskRuntime& task_runtim
 
     publishTaskDiagnostic(task_runtime, "_stream_target_scan_rate", scan_rate);
     publishTaskDiagnostic(task_runtime, "_stream_scans_per_read", static_cast<double>(scans_per_read));
-
-    {
-        std::lock_guard<std::mutex> handle_lock(handle_mutex_);
-        if (!isConnected()) {
-            releaseStream(current_task_key);
-            return;
-        }
-
-        if (!demo_mode_) {
-            const int error = LJM_eStreamStart(
-                handle_,
-                scans_per_read,
-                static_cast<int>(addresses.size()),
-                addresses.data(),
-                &scan_rate
-            );
-            if (error != LJME_NOERROR) {
-                handleError(error, "stream_start");
-                releaseStream(current_task_key);
-                return;
-            }
-        }
-    }
-
-    publishTaskDiagnostic(task_runtime, "_stream_actual_scan_rate", scan_rate);
-    publishTaskDiagnostic(task_runtime, "_stream_expected_read_rate", scan_rate / static_cast<double>(scans_per_read));
     publishTaskDiagnostic(task_runtime, "_stream_worker_read_rate", 0.0);
     publishTaskDiagnostic(task_runtime, "_stream_last_read_ms", 0.0);
+    publishTaskDiagnostic(task_runtime, "_stream_device_scan_backlog", 0.0);
+    publishTaskDiagnostic(task_runtime, "_stream_ljm_scan_backlog", 0.0);
 
     std::mt19937 rng(std::random_device{}());
     std::uniform_real_distribution<double> demo_distribution(0.0, 10.0);
-    const auto stream_start = unixNanosecondsNow();
+    auto stream_start = unixNanosecondsNow();
     auto rate_window_start = std::chrono::steady_clock::now();
+    auto last_successful_read = rate_window_start;
+    bool stream_started = false;
 
     while (!task_runtime.isStopRequested()) {
-        const auto read_start = std::chrono::steady_clock::now();
+        if (!stream_started) {
+            if (demo_mode_) {
+                publishTaskDiagnostic(task_runtime, "_stream_actual_scan_rate", scan_rate);
+                publishTaskDiagnostic(task_runtime, "_stream_expected_read_rate", scan_rate / static_cast<double>(scans_per_read));
+                publishTaskDiagnostic(task_runtime, "_stream_worker_read_rate", 0.0);
+                read_number = 0;
+                reads_since_rate_publish = 0;
+                stream_start = unixNanosecondsNow();
+                rate_window_start = std::chrono::steady_clock::now();
+                last_successful_read = rate_window_start;
+                stream_started = true;
+            } else if (!isConnected()) {
+                const int error = connect();
+                const auto now = std::chrono::steady_clock::now();
+                publishTaskDiagnostic(task_runtime, "_stream_last_read_ms", std::chrono::duration<double, std::milli>(now - last_successful_read).count());
+                if (error != LJME_NOERROR) {
+                    handleError(error, "stream_connect");
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                    continue;
+                }
+                continue;
+            } else {
+                double requested_scan_rate = scan_rate;
+                int error = LJME_NOERROR;
+                {
+                    std::lock_guard<std::mutex> handle_lock(handle_mutex_);
+                    if (handle_ == -1) {
+                        error = -1;
+                    } else {
+                        error = LJM_eStreamStart(
+                            handle_,
+                            scans_per_read,
+                            static_cast<int>(addresses.size()),
+                            addresses.data(),
+                            &requested_scan_rate
+                        );
+                        if (isStreamAlreadyStartedError(error)) {
+                            const int stop_error = LJM_eStreamStop(handle_);
+                            if (!isHarmlessStreamStopError(stop_error)) {
+                                error = stop_error;
+                            } else {
+                                requested_scan_rate = scan_rate;
+                                error = LJM_eStreamStart(
+                                    handle_,
+                                    scans_per_read,
+                                    static_cast<int>(addresses.size()),
+                                    addresses.data(),
+                                    &requested_scan_rate
+                                );
+                            }
+                        }
+                    }
+                }
+
+                const auto now = std::chrono::steady_clock::now();
+                publishTaskDiagnostic(task_runtime, "_stream_last_read_ms", std::chrono::duration<double, std::milli>(now - last_successful_read).count());
+                if (error != LJME_NOERROR) {
+                    handleError(error, "stream_start");
+                    markDisconnectedFromStreamError();
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                    continue;
+                }
+
+                scan_rate = requested_scan_rate;
+                publishTaskDiagnostic(task_runtime, "_stream_actual_scan_rate", scan_rate);
+                publishTaskDiagnostic(task_runtime, "_stream_expected_read_rate", scan_rate / static_cast<double>(scans_per_read));
+                publishTaskDiagnostic(task_runtime, "_stream_worker_read_rate", 0.0);
+                read_number = 0;
+                reads_since_rate_publish = 0;
+                stream_start = unixNanosecondsNow();
+                rate_window_start = std::chrono::steady_clock::now();
+                last_successful_read = rate_window_start;
+                stream_started = true;
+            }
+        }
+
         int error = LJME_NOERROR;
         if (demo_mode_) {
             for (auto& value : data) {
                 value = demo_distribution(rng);
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<int>((static_cast<double>(scans_per_read) / scan_rate) * 1000.0)));
+            std::this_thread::sleep_for(std::chrono::duration<double>(static_cast<double>(scans_per_read) / scan_rate));
         } else {
             std::lock_guard<std::mutex> handle_lock(handle_mutex_);
-            error = LJM_eStreamRead(handle_, data.data(), &device_backlog, &ljm_backlog);
+            if (handle_ == -1) {
+                error = -1;
+            } else {
+                error = LJM_eStreamRead(handle_, data.data(), &device_backlog, &ljm_backlog);
+            }
         }
         const auto read_end = std::chrono::steady_clock::now();
-        const double last_read_ms = std::chrono::duration<double, std::milli>(read_end - read_start).count();
 
         if (error != LJME_NOERROR) {
             handleError(error, "stream_read");
-            break;
+            stream_started = false;
+            markDisconnectedFromStreamError();
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            continue;
         }
 
+        publishTaskDiagnostic(task_runtime, "_stream_last_read_ms", std::chrono::duration<double, std::milli>(read_end - last_successful_read).count());
+        last_successful_read = read_end;
         ++read_number;
         ++reads_since_rate_publish;
         std::unordered_map<std::string, std::vector<std::pair<double, uint64_t>>> grouped;
@@ -478,7 +629,6 @@ void LabJackT7Controller::runStreamWorker(DARTWIC::API::TaskRuntime& task_runtim
 
         publishTaskDiagnostic(task_runtime, "_stream_device_scan_backlog", static_cast<double>(device_backlog));
         publishTaskDiagnostic(task_runtime, "_stream_ljm_scan_backlog", static_cast<double>(ljm_backlog));
-        publishTaskDiagnostic(task_runtime, "_stream_read_number", static_cast<double>(read_number));
 
         const auto rate_window_end = std::chrono::steady_clock::now();
         const double rate_window_seconds = std::chrono::duration<double>(rate_window_end - rate_window_start).count();
@@ -488,22 +638,22 @@ void LabJackT7Controller::runStreamWorker(DARTWIC::API::TaskRuntime& task_runtim
                 "_stream_worker_read_rate",
                 static_cast<double>(reads_since_rate_publish) / rate_window_seconds
             );
-            publishTaskDiagnostic(task_runtime, "_stream_last_read_ms", last_read_ms);
             reads_since_rate_publish = 0;
             rate_window_start = rate_window_end;
         }
     }
 
-    if (!demo_mode_) {
+    if (stream_started && !demo_mode_) {
         std::lock_guard<std::mutex> handle_lock(handle_mutex_);
         if (handle_ != -1) {
             const int error = LJM_eStreamStop(handle_);
-            if (error != LJME_NOERROR && error != LJME_STREAM_NOT_INITIALIZED) {
+            if (!isHarmlessStreamStopError(error)) {
                 handleError(error, "stream_stop");
             }
         }
     }
 
+    publishTaskDiagnostic(task_runtime, "_stream_last_read_ms", 0.0);
     releaseStream(current_task_key);
 }
 
@@ -542,7 +692,7 @@ void LabJackT7Controller::stopStreamTaskKey(const std::string& task_key) {
         std::lock_guard<std::mutex> handle_lock(handle_mutex_);
         if (handle_ != -1) {
             const int error = LJM_eStreamStop(handle_);
-            if (error != LJME_NOERROR && error != LJME_STREAM_NOT_INITIALIZED) {
+            if (!isHarmlessStreamStopError(error)) {
                 handleError(error, "stream_stop");
             }
         }
