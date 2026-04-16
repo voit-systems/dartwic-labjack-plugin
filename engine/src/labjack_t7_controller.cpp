@@ -5,8 +5,10 @@
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <cmath>
 #include <cstring>
 #include <iostream>
+#include <map>
 #include <random>
 #include <sstream>
 #include <thread>
@@ -72,6 +74,10 @@ namespace {
             errorTextContains(error_number, "STREAM_NOT_RUNNING") ||
             errorTextContains(error_number, "not running");
     }
+
+    bool isIntegerJson(const nlohmann::json& value) {
+        return value.is_number_integer() || value.is_number_unsigned();
+    }
 }
 
 LabJackT7Controller::LabJackT7Controller(
@@ -86,6 +92,7 @@ LabJackT7Controller::LabJackT7Controller(
     connection_type_(std::move(connection_type)),
     identifier_(std::move(identifier)),
     connection_loop_name_("labjack_t7_connection_" + instance_name_) {
+    ljm_library_ready_ = validateLjmLibrary();
     module_->dartwic->onStart(connection_loop_name_, [this]() { connectionLoopStart(); });
     module_->dartwic->onLoop(connection_loop_name_, [this]() { connectionLoop(); });
     module_->dartwic->onEnd(connection_loop_name_, [this]() { connectionLoopEnd(); });
@@ -137,6 +144,13 @@ void LabJackT7Controller::connectionLoopStart() {
 }
 
 void LabJackT7Controller::connectionLoop() {
+    if (!ljm_library_ready_) {
+        connected_ = false;
+        upsert("device_connected", 0.0);
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        return;
+    }
+
     if (handle_ == -1) {
         const int error = connect();
         if (error != LJME_NOERROR) {
@@ -153,6 +167,54 @@ void LabJackT7Controller::connectionLoop() {
 void LabJackT7Controller::connectionLoopEnd() {
     stopStream();
     disconnect();
+}
+
+bool LabJackT7Controller::validateLjmLibrary() const {
+    double runtime_version = 0.0;
+    int error = LJM_ReadLibraryConfigS(LJM_LIBRARY_VERSION, &runtime_version);
+    if (error != LJME_NOERROR) {
+        handleError(error, "ljm_library_version");
+        consoleError(
+            "LabJack T7 LJM Install Required [" + instance_name_ + "]",
+            "The LabJack LJM system install could not be read. Install the LabJack LJM Basic driver package.",
+            {instance_name_ + "/device_connected.value"},
+            "Install LabJack LJM version " + std::to_string(LJM_VERSION) + " and restart DARTWIC.",
+            0
+        );
+        return false;
+    }
+
+    if (std::abs(runtime_version - LJM_VERSION) > 0.00001) {
+        std::ostringstream description;
+        description << "The installed LabJack LJM runtime version does not match the SDK used to build this plugin."
+            << "\n[Installed LJM runtime: " << runtime_version << "]"
+            << "\n[Plugin SDK version: " << LJM_VERSION << "]";
+        consoleError(
+            "LabJack T7 LJM Version Mismatch [" + instance_name_ + "]",
+            description.str(),
+            {instance_name_ + "/device_connected.value"},
+            "Install LabJack LJM version " + std::to_string(LJM_VERSION) + " so the system runtime matches the plugin SDK.",
+            0
+        );
+        return false;
+    }
+
+    int address = 0;
+    int type = 0;
+    error = LJM_NameToAddress("AIN0", &address, &type);
+    if (error != LJME_NOERROR) {
+        handleError(error, "ljm_constants_check");
+        consoleError(
+            "LabJack T7 LJM Constants Error [" + instance_name_ + "]",
+            "The installed LabJack LJM runtime could not resolve AIN0. The system LJM constants/configuration files may be missing or corrupt.",
+            {instance_name_ + "/device_connected.value"},
+            "Repair or reinstall LabJack LJM version " + std::to_string(LJM_VERSION) + ", then restart DARTWIC.",
+            0
+        );
+        return false;
+    }
+
+    return true;
 }
 
 int LabJackT7Controller::connect() {
@@ -231,7 +293,7 @@ void LabJackT7Controller::verifyConnection() {
     handleError(error, "verify_connection");
 }
 
-void LabJackT7Controller::handleError(int error_number, const std::string& operation) {
+void LabJackT7Controller::handleError(int error_number, const std::string& operation) const {
     char error_string[LJM_MAX_NAME_SIZE] = "LJM error not found.";
     LJM_ErrorToString(error_number, error_string);
     consoleError(
@@ -262,8 +324,12 @@ std::optional<LabJackT7Controller::RapidChannel> LabJackT7Controller::splitRapid
 }
 
 std::string LabJackT7Controller::buildStreamLabJackName(const nlohmann::json& mapping) const {
-    const std::string channel_type = mapping.value("channel_type", "analog");
-    const int register_number = mapping.value("register", 0);
+    const std::string channel_type = mapping.contains("channel_type") && mapping["channel_type"].is_string()
+        ? mapping["channel_type"].get<std::string>()
+        : "analog";
+    const int register_number = mapping.contains("register") && isIntegerJson(mapping["register"])
+        ? mapping["register"].get<int>()
+        : 0;
     return (channel_type == "digital" ? "DIO" : "AIN") + std::to_string(register_number);
 }
 
@@ -271,39 +337,171 @@ std::string LabJackT7Controller::buildDigitalLabJackName(const nlohmann::json& m
     return "DIO" + std::to_string(mapping.value("register", 0));
 }
 
-std::vector<LabJackT7Controller::StreamMapping> LabJackT7Controller::parseStreamMappings(const nlohmann::json& arguments) {
+std::vector<LabJackT7Controller::StreamMapping> LabJackT7Controller::parseStreamMappings(
+    const nlohmann::json& arguments,
+    std::vector<std::string>& errors
+) {
     std::vector<StreamMapping> resolved;
     if (!arguments.contains("mappings") || !arguments["mappings"].is_array()) {
+        errors.push_back("Stream task arguments must include a mappings array.");
         return resolved;
     }
 
+    std::map<int, std::pair<int, double>> analog_config_by_register;
+    int mapping_index = 0;
     for (const auto& mapping : arguments["mappings"]) {
         if (!mapping.is_object() || !mapping.contains("channel")) {
+            errors.push_back("Mapping " + std::to_string(mapping_index) + " must be an object with a channel.");
+            ++mapping_index;
             continue;
         }
 
         auto destination = parseRapidChannel(mapping["channel"]);
         if (!destination.has_value()) {
+            errors.push_back("Mapping " + std::to_string(mapping_index) + " has an invalid RAPID channel path.");
+            ++mapping_index;
             continue;
         }
 
+        if (!mapping.contains("register") || !isIntegerJson(mapping["register"])) {
+            errors.push_back("Mapping " + std::to_string(mapping_index) + " must have an integer register.");
+            ++mapping_index;
+            continue;
+        }
+
+        const int register_number = mapping["register"].get<int>();
+        if (register_number < 0) {
+            errors.push_back("Mapping " + std::to_string(mapping_index) + " register must be zero or greater.");
+            ++mapping_index;
+            continue;
+        }
+
+        const std::string channel_type = mapping.contains("channel_type") && mapping["channel_type"].is_string()
+            ? mapping["channel_type"].get<std::string>()
+            : "analog";
+        const bool is_analog = channel_type != "digital";
         const std::string labjack_name = buildStreamLabJackName(mapping);
         int address = 0;
         int type = 0;
         const int error = LJM_NameToAddress(labjack_name.c_str(), &address, &type);
         if (error != LJME_NOERROR) {
-            handleError(error, "resolve_stream_channel:" + labjack_name);
+            errors.push_back("Mapping " + std::to_string(mapping_index) + " uses invalid LabJack register " + labjack_name + ".");
+            ++mapping_index;
             continue;
         }
 
-        resolved.push_back(StreamMapping{
+        StreamMapping resolved_mapping{
             .labjack_name = labjack_name,
             .destination = *destination,
-            .address = address
-        });
+            .address = address,
+            .is_analog = is_analog,
+            .register_number = register_number
+        };
+
+        if (is_analog) {
+            if (mapping.contains("negative_channel")) {
+                if (!isIntegerJson(mapping["negative_channel"])) {
+                    errors.push_back("Mapping " + std::to_string(mapping_index) + " negative_channel must be an integer.");
+                    ++mapping_index;
+                    continue;
+                }
+                resolved_mapping.negative_channel = mapping["negative_channel"].get<int>();
+            }
+            if (mapping.contains("range")) {
+                if (!mapping["range"].is_number()) {
+                    errors.push_back("Mapping " + std::to_string(mapping_index) + " range must be a number.");
+                    ++mapping_index;
+                    continue;
+                }
+                resolved_mapping.range = mapping["range"].get<double>();
+            }
+
+            validateAnalogStreamMapping(resolved_mapping, errors);
+            const auto existing_config = analog_config_by_register.find(register_number);
+            if (existing_config != analog_config_by_register.end()) {
+                const auto [existing_negative_channel, existing_range] = existing_config->second;
+                if (existing_negative_channel != resolved_mapping.negative_channel || existing_range != resolved_mapping.range) {
+                    errors.push_back("Analog register AIN" + std::to_string(register_number) + " is mapped multiple times with conflicting range or negative_channel.");
+                }
+            } else {
+                analog_config_by_register.emplace(register_number, std::make_pair(resolved_mapping.negative_channel, resolved_mapping.range));
+            }
+        }
+
+        resolved.push_back(resolved_mapping);
+        ++mapping_index;
     }
 
     return resolved;
+}
+
+bool LabJackT7Controller::validateAnalogStreamMapping(const StreamMapping& mapping, std::vector<std::string>& errors) const {
+    const auto original_error_count = errors.size();
+    if (mapping.negative_channel < 0 || mapping.negative_channel > 253) {
+        errors.push_back(mapping.labjack_name + " negative_channel must be between 0 and 253, or 199 for GND.");
+    }
+
+    if (!isValidAnalogRange(mapping.range)) {
+        errors.push_back(mapping.labjack_name + " range must be one of 10, 1, 0.1, or 0.01.");
+    }
+
+    if (mapping.register_number >= 0 && mapping.register_number <= 13 && mapping.negative_channel != LJM_GND) {
+        if (mapping.register_number % 2 != 0 || mapping.negative_channel != mapping.register_number + 1) {
+            errors.push_back(mapping.labjack_name + " built-in differential mapping must use an even positive channel and the next odd negative channel, or 199 for GND.");
+        }
+    }
+
+    return errors.size() == original_error_count;
+}
+
+bool LabJackT7Controller::isValidAnalogRange(double range) const {
+    return range == 10.0 || range == 1.0 || range == 0.1 || range == 0.01;
+}
+
+void LabJackT7Controller::handleStreamConfigError(
+    const std::vector<std::string>& errors,
+    DARTWIC::API::TaskRuntime& task_runtime
+) const {
+    std::ostringstream description;
+    description << "LabJack stream configuration is invalid.";
+    for (const auto& error : errors) {
+        description << "\n- " << error;
+    }
+
+    consoleError(
+        "LabJack T7 Stream Config Error [" + instance_name_ + "]",
+        description.str(),
+        {task_runtime.getPortalName() + "/" + task_runtime.getTaskName()},
+        "Fix the LabJack stream task mapping configuration, then start the stream again.",
+        0
+    );
+}
+
+int LabJackT7Controller::applyAnalogStreamConfigLocked(
+    const std::vector<StreamMapping>& mappings,
+    std::string& operation
+) {
+    for (const auto& mapping : mappings) {
+        if (!mapping.is_analog) {
+            continue;
+        }
+
+        const std::string range_name = mapping.labjack_name + "_RANGE";
+        int error = LJM_eWriteName(handle_, range_name.c_str(), mapping.range);
+        if (error != LJME_NOERROR) {
+            operation = "stream_config:" + range_name;
+            return error;
+        }
+
+        const std::string negative_channel_name = mapping.labjack_name + "_NEGATIVE_CH";
+        error = LJM_eWriteName(handle_, negative_channel_name.c_str(), static_cast<double>(mapping.negative_channel));
+        if (error != LJME_NOERROR) {
+            operation = "stream_config:" + negative_channel_name;
+            return error;
+        }
+    }
+
+    return LJME_NOERROR;
 }
 
 std::vector<LabJackT7Controller::DigitalWriteMapping> LabJackT7Controller::parseDigitalWriteMappings(const nlohmann::json& arguments) const {
@@ -405,6 +603,10 @@ uint64_t LabJackT7Controller::unixNanosecondsNow() const {
 }
 
 void LabJackT7Controller::applyDigitalWrite(const nlohmann::json& arguments) {
+    if (!ljm_library_ready_) {
+        return;
+    }
+
     if (!isConnected()) {
         return;
     }
@@ -440,6 +642,10 @@ void LabJackT7Controller::applyDigitalWrite(const nlohmann::json& arguments) {
 }
 
 void LabJackT7Controller::runStreamWorker(DARTWIC::API::TaskRuntime& task_runtime) {
+    if (!ljm_library_ready_) {
+        return;
+    }
+
     const auto current_task_key = taskKey(task_runtime);
     if (!tryAcquireStream(current_task_key)) {
         std::string active_task;
@@ -458,9 +664,16 @@ void LabJackT7Controller::runStreamWorker(DARTWIC::API::TaskRuntime& task_runtim
     }
 
     const auto& arguments = task_runtime.getArguments();
-    const auto mappings = parseStreamMappings(arguments);
+    std::vector<std::string> stream_config_errors;
+    const auto mappings = parseStreamMappings(arguments, stream_config_errors);
+    if (!stream_config_errors.empty()) {
+        handleStreamConfigError(stream_config_errors, task_runtime);
+        stopStreamTaskKey(current_task_key);
+        return;
+    }
     if (mappings.empty()) {
-        releaseStream(current_task_key);
+        handleStreamConfigError({"Stream task must include at least one valid mapping."}, task_runtime);
+        stopStreamTaskKey(current_task_key);
         return;
     }
 
@@ -529,24 +742,27 @@ void LabJackT7Controller::runStreamWorker(DARTWIC::API::TaskRuntime& task_runtim
             } else {
                 double requested_scan_rate = scan_rate;
                 int error = LJME_NOERROR;
+                bool exit_after_config_error = false;
                 {
                     std::lock_guard<std::mutex> handle_lock(handle_mutex_);
                     if (handle_ == -1) {
                         error = -1;
                     } else {
-                        error = LJM_eStreamStart(
-                            handle_,
-                            scans_per_read,
-                            static_cast<int>(addresses.size()),
-                            addresses.data(),
-                            &requested_scan_rate
-                        );
-                        if (isStreamAlreadyStartedError(error)) {
-                            const int stop_error = LJM_eStreamStop(handle_);
-                            if (!isHarmlessStreamStopError(stop_error)) {
-                                error = stop_error;
+                        const int pre_config_stop_error = LJM_eStreamStop(handle_);
+                        if (!isHarmlessStreamStopError(pre_config_stop_error)) {
+                            handleError(pre_config_stop_error, "stream_stop_before_config");
+                            exit_after_config_error = true;
+                        } else {
+                            std::string config_operation;
+                            error = applyAnalogStreamConfigLocked(mappings, config_operation);
+                            if (error != LJME_NOERROR) {
+                                handleError(error, config_operation);
+                                const int stop_error = LJM_eStreamStop(handle_);
+                                if (!isHarmlessStreamStopError(stop_error)) {
+                                    handleError(stop_error, "stream_stop_after_config_error");
+                                }
+                                exit_after_config_error = true;
                             } else {
-                                requested_scan_rate = scan_rate;
                                 error = LJM_eStreamStart(
                                     handle_,
                                     scans_per_read,
@@ -554,6 +770,21 @@ void LabJackT7Controller::runStreamWorker(DARTWIC::API::TaskRuntime& task_runtim
                                     addresses.data(),
                                     &requested_scan_rate
                                 );
+                                if (isStreamAlreadyStartedError(error)) {
+                                    const int stop_error = LJM_eStreamStop(handle_);
+                                    if (!isHarmlessStreamStopError(stop_error)) {
+                                        error = stop_error;
+                                    } else {
+                                        requested_scan_rate = scan_rate;
+                                        error = LJM_eStreamStart(
+                                            handle_,
+                                            scans_per_read,
+                                            static_cast<int>(addresses.size()),
+                                            addresses.data(),
+                                            &requested_scan_rate
+                                        );
+                                    }
+                                }
                             }
                         }
                     }
@@ -561,6 +792,11 @@ void LabJackT7Controller::runStreamWorker(DARTWIC::API::TaskRuntime& task_runtim
 
                 const auto now = std::chrono::steady_clock::now();
                 publishTaskDiagnostic(task_runtime, "_stream_last_read_ms", std::chrono::duration<double, std::milli>(now - last_successful_read).count());
+                if (exit_after_config_error) {
+                    publishTaskDiagnostic(task_runtime, "_stream_last_read_ms", 0.0);
+                    releaseStream(current_task_key);
+                    return;
+                }
                 if (error != LJME_NOERROR) {
                     handleError(error, "stream_start");
                     markDisconnectedFromStreamError();

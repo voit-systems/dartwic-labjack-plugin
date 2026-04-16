@@ -8,7 +8,7 @@
 #ifndef LAB_JACK_M_HEADER
 #define LAB_JACK_M_HEADER
 
-#define LJM_VERSION 1.2302
+#define LJM_VERSION 1.2304
 	// Format: xx.yyzz
 	// xx is the major version (left of the decimal).
 	// yy is the minor version (the two places to the right of the decimal).

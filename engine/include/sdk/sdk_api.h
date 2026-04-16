@@ -55,6 +55,7 @@ namespace DARTWIC::API {
     };
 
     using ChannelValue = std::variant<double, int, std::string, bool, RecordMode, ControlPolicy>;
+    using OperationHandler = std::function<nlohmann::json(const nlohmann::json& payload)>;
 
     struct TaskTypeDefinition;
 
@@ -155,6 +156,8 @@ namespace DARTWIC::API {
         virtual void upsertChannelValueBulk(const std::string& portal,
             const std::string& channel,
             const std::vector<std::pair<double, uint64_t>>& data) = 0;
+
+        virtual void registerOperation(const std::string& operation_name, OperationHandler handler) = 0;
     };
 }
 

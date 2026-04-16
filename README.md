@@ -13,10 +13,12 @@ This plugin adds LabJack T7 support to DARTWIC. It provides a module instance fo
 ## Requirements
 
 - DARTWIC with engine plugin API version 2 and interface plugin API version 1.
-- LabJack LJM installed on the host machine.
+- LabJack LJM Basic driver package installed on the DARTWIC engine machine.
 - A LabJack T7 reachable through the configured LJM connection settings.
 
-The plugin links against the LabJack LJM driver library included under `engine/libs/LabJack/Drivers`.
+The plugin links against the LabJack LJM SDK files included under `engine/libs/LabJack/Drivers`. Keep `LabJackM.h` and `64bit/LabJackM.lib` from the same LabJack installer release. At runtime the plugin uses the system LJM install, verifies that the installed LJM runtime version matches the SDK version from `LabJackM.h`, and checks that the system constants can resolve standard registers such as `AIN0`. This repo currently targets LJM `1.2304`.
+
+The module settings page reads the plugin SDK version and installed system LJM version through the plugin Tempest operation `labjack_t7/get-ljm-info`.
 
 ## Module Configuration
 
@@ -116,6 +118,8 @@ Arguments:
     {
       "channel_type": "analog",
       "register": 0,
+      "negative_channel": 199,
+      "range": 10,
       "channel": "portal/ain0"
     },
     {
@@ -137,9 +141,13 @@ Mapping fields:
 
 - `channel_type`: `analog` maps to `AIN<n>`. `digital` maps to `DIO<n>`.
 - `register`: The LabJack register number.
+- `negative_channel`: Analog-only LabJack negative channel. Use `199` for GND/single-ended, or the paired negative AIN for differential readings.
+- `range`: Analog-only T7 input range. Valid values are `10`, `1`, `0.1`, and `0.01`.
 - `channel`: The RAPID destination channel.
 
 Only one stream task can own the LabJack hardware stream at a time for a module instance.
+
+Analog stream mappings are validated before the hardware stream starts. If a mapping is invalid, or if applying `AIN<n>_RANGE` or `AIN<n>_NEGATIVE_CH` fails, the worker reports a DartWIC console error, stops any active hardware stream, releases stream ownership, and exits.
 
 ## Stream Channel Behavior
 
@@ -165,6 +173,7 @@ If the LabJack disconnects during streaming, the worker:
 - Closes the stale LJM handle.
 - Keeps updating stream diagnostics.
 - Attempts to reconnect.
+- Reapplies the analog `range` and `negative_channel` settings for every analog stream mapping.
 - Restarts the hardware stream after reconnecting.
 
 If stream start fails because LJM reports that the stream is already active, the worker stops the existing hardware stream and retries the stream start.

@@ -12,6 +12,18 @@ const streamDiagnosticSuffixes = [
     "_stream_ljm_scan_backlog"
 ];
 
+const analogRangeOptions = [
+    { value: "10", label: "10V" },
+    { value: "1", label: "1V" },
+    { value: "0.1", label: "0.1V" },
+    { value: "0.01", label: "0.01V" }
+];
+
+function normalizeAnalogRange(value) {
+    const stringValue = String(value ?? "10");
+    return analogRangeOptions.some((option) => option.value === stringValue) ? stringValue : "10";
+}
+
 function taskChannel(task, suffix) {
     return `${task.portal}/${task.name}${suffix}`;
 }
@@ -20,6 +32,15 @@ function readTelemetryValue(liveChannels, channelName, fallback = null) {
     const value = liveChannels?.[channelName]?.channel_data?.value;
     const numericValue = Number(value);
     return Number.isFinite(numericValue) ? numericValue : fallback;
+}
+
+function formatLjmVersion(value) {
+    const numericValue = Number(value);
+    if (!Number.isFinite(numericValue) || numericValue <= 0) {
+        return "UNKNOWN";
+    }
+
+    return numericValue.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
 }
 
 function moduleDeviceConnectedChannel(task) {
@@ -41,6 +62,8 @@ function normalizeMappings(argumentsPayload, convertChannelValuePathToChannelNam
             channel: typeof item.channel === "string"
                 ? convertChannelValuePathToChannelName(item.channel)
                 : "",
+            negativeChannel: Number.isFinite(Number(item.negative_channel)) ? String(item.negative_channel) : "199",
+            range: normalizeAnalogRange(item.range),
             isStream
         }));
 }
@@ -206,23 +229,120 @@ export function createModuleUiPlugin(host) {
         return moduleInstances;
     }
 
+    function LjmRuntimePanel({ operation, instanceName = "" }) {
+        const [ljmInfo, setLjmInfo] = useState(null);
+        const [ljmInfoError, setLjmInfoError] = useState("");
+        const [isLoadingLjmInfo, setIsLoadingLjmInfo] = useState(false);
+        const sdkVersion = formatLjmVersion(ljmInfo?.plugin_sdk_version ?? ljmInfo?.required_ljm_version);
+        const runtimeVersion = formatLjmVersion(ljmInfo?.system_runtime_version);
+        const loadedLibraryPath = String(ljmInfo?.loaded_library_path || "UNKNOWN");
+        const isLjmReady = Boolean(ljmInfo?.library_ready);
+        const isVersionMatch = Boolean(ljmInfo?.version_match);
+        const constantsOk = Boolean(ljmInfo?.constants_ok);
+        const isLjmGood = isLjmReady && isVersionMatch && constantsOk;
+
+        async function loadLjmInfo() {
+            if (!operation) {
+                setLjmInfo(null);
+                setLjmInfoError("LJM info operation is not available.");
+                return;
+            }
+
+            setIsLoadingLjmInfo(true);
+            try {
+                const result = await operation("labjack_t7/get-ljm-info", {
+                    ...(instanceName ? { module_instance_name: instanceName } : {})
+                }, 15000);
+
+                if (result?.error) {
+                    setLjmInfo(null);
+                    setLjmInfoError(result?.payload?.error || "Failed to read LJM version information.");
+                    return;
+                }
+
+                const payload = result?.payload || {};
+                setLjmInfo(payload);
+                setLjmInfoError(payload.error || "");
+            } catch (error) {
+                setLjmInfo(null);
+                setLjmInfoError(error instanceof Error ? error.message : String(error));
+            } finally {
+                setIsLoadingLjmInfo(false);
+            }
+        }
+
+        useEffect(() => {
+            void loadLjmInfo();
+        }, [instanceName, operation]);
+
+        return (
+            <div className="flex flex-col gap-3 rounded-lg border border-border p-4">
+                <div className="flex items-center justify-between gap-3">
+                    <Label className="text-md font-semibold">LJM Runtime</Label>
+                    <div className="flex items-center gap-2">
+                        <div className={`rounded px-2 py-1 text-[10px] font-medium ${isLjmGood ? "border border-green-500/40 bg-green-500/15 text-green-500" : "border border-red-500/40 bg-red-500/15 text-red-500"}`}>
+                            {isLoadingLjmInfo ? "CHECKING" : isLjmGood ? "MATCHED" : "CHECK INSTALL"}
+                        </div>
+                        <Button variant="outline" onClick={loadLjmInfo} disabled={isLoadingLjmInfo}>
+                            REFRESH
+                        </Button>
+                    </div>
+                </div>
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                    <div className="min-w-0 rounded-md border bg-muted/40 px-3 py-2">
+                        <div className="text-muted-foreground">PLUGIN SDK</div>
+                        <div className="truncate">{sdkVersion}</div>
+                    </div>
+                    <div className="min-w-0 rounded-md border bg-muted/40 px-3 py-2">
+                        <div className="text-muted-foreground">SYSTEM INSTALL</div>
+                        <div className="truncate">{runtimeVersion}</div>
+                    </div>
+                </div>
+                <div className="min-w-0 rounded-md border bg-muted/40 px-3 py-2 text-xs">
+                    <div className="text-muted-foreground">LOADED DLL</div>
+                    <div className="break-all">{loadedLibraryPath}</div>
+                </div>
+                <div className="text-xs text-muted-foreground">
+                    Install the LabJack LJM Basic driver package that matches the plugin SDK version.
+                </div>
+                {ljmInfoError ? (
+                    <div className="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+                        {ljmInfoError}
+                    </div>
+                ) : null}
+            </div>
+        );
+    }
+
     function MappingRow({ mapping, isStream, onChange, onRemove, removeDisabled }) {
+        const isAnalogStreamMapping = isStream && mapping.channelType !== "digital";
         return (
             <div
                 className="grid items-center gap-2"
-                style={{ gridTemplateColumns: isStream ? "130px 100px minmax(0, 1fr) auto" : "100px minmax(0, 1fr) auto" }}
+                style={{
+                    gridTemplateColumns: isAnalogStreamMapping
+                        ? "120px 90px 90px 120px minmax(0, 1fr) auto"
+                        : isStream
+                            ? "120px 90px minmax(0, 1fr) auto"
+                            : "100px minmax(0, 1fr) auto"
+                }}
             >
                 {isStream ? (
                     <Select
                         value={mapping.channelType}
-                        onValueChange={(value) => onChange({ ...mapping, channelType: value })}
+                        onValueChange={(value) => onChange({
+                            ...mapping,
+                            channelType: value,
+                            negativeChannel: value === "digital" ? mapping.negativeChannel : (mapping.negativeChannel || "199"),
+                            range: value === "digital" ? mapping.range : normalizeAnalogRange(mapping.range)
+                        })}
                     >
                         <SelectTrigger className="w-full">
                             <SelectValue placeholder="TYPE" />
                         </SelectTrigger>
                         <SelectContent>
-                            <SelectItem value="analog">ANALOG</SelectItem>
-                            <SelectItem value="digital">DIGITAL</SelectItem>
+                            <SelectItem value="analog">AIN</SelectItem>
+                            <SelectItem value="digital">DIO</SelectItem>
                         </SelectContent>
                     </Select>
                 ) : null}
@@ -233,6 +353,32 @@ export function createModuleUiPlugin(host) {
                     value={mapping.register}
                     onChange={(event) => onChange({ ...mapping, register: event.target.value })}
                 />
+                {isAnalogStreamMapping ? (
+                    <>
+                        <Input
+                            type="number"
+                            min="0"
+                            placeholder="NEG CH"
+                            value={mapping.negativeChannel}
+                            onChange={(event) => onChange({ ...mapping, negativeChannel: event.target.value })}
+                        />
+                        <Select
+                            value={normalizeAnalogRange(mapping.range)}
+                            onValueChange={(value) => onChange({ ...mapping, range: value })}
+                        >
+                            <SelectTrigger className="w-full">
+                                <SelectValue placeholder="RANGE" />
+                            </SelectTrigger>
+                            <SelectContent>
+                                {analogRangeOptions.map((option) => (
+                                    <SelectItem key={option.value} value={option.value}>
+                                        {option.label}
+                                    </SelectItem>
+                                ))}
+                            </SelectContent>
+                        </Select>
+                    </>
+                ) : null}
                 <ChannelComboBox
                     mode={isStream ? "write" : "read"}
                     showFieldSelector={false}
@@ -284,11 +430,18 @@ export function createModuleUiPlugin(host) {
 
         async function saveTask() {
             const cleanedMappings = mappings
-                .map((mapping) => ({
-                    ...(isStream ? { channel_type: mapping.channelType === "digital" ? "digital" : "analog" } : {}),
-                    register: Number(mapping.register),
-                    channel: mapping.channel.trim()
-                }))
+                .map((mapping) => {
+                    const channelType = mapping.channelType === "digital" ? "digital" : "analog";
+                    return {
+                        ...(isStream ? { channel_type: channelType } : {}),
+                        register: Number(mapping.register),
+                        ...(isStream && channelType === "analog" ? {
+                            negative_channel: Number(mapping.negativeChannel || 199),
+                            range: Number(normalizeAnalogRange(mapping.range))
+                        } : {}),
+                        channel: mapping.channel.trim()
+                    };
+                })
                 .filter((mapping) => Number.isFinite(mapping.register) && mapping.channel !== "");
 
             if (!selectedInstance) {
@@ -372,7 +525,12 @@ export function createModuleUiPlugin(host) {
                     ) : null}
                     <div className="space-y-2">
                         <div className="flex items-center justify-between gap-2">
-                            <Label>MAPPINGS</Label>
+                            <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                                <Label className="pr-1">MAPPINGS</Label>
+                                <span className="text-xs text-muted-foreground">
+                                     (register type, channel, negative channel, range, RAPID channel)
+                                </span>
+                            </div>
                             <Button
                                 variant="outline"
                                 onClick={() =>
@@ -380,6 +538,8 @@ export function createModuleUiPlugin(host) {
                                         id: `mapping-${mappingIdRef.current++}`,
                                         channelType: "analog",
                                         register: "",
+                                        negativeChannel: "199",
+                                        range: "10",
                                         channel: "",
                                         isStream
                                     }]))
@@ -435,9 +595,10 @@ export function createModuleUiPlugin(host) {
         );
     }
 
-    function LabJackModuleConfigPage({ instanceConfig, setInstanceConfig, save, moduleConfig = {} }) {
+    function LabJackModuleConfigPage({ instanceConfig, setInstanceConfig, save, moduleConfig = {}, operation }) {
         const [isSaving, setIsSaving] = useState(false);
         const parameters = instanceConfig?.parameters || {};
+        const instanceName = instanceConfig?.name || "";
 
         function updateParameterField(key, value) {
             setInstanceConfig((prev) => ({
@@ -495,11 +656,21 @@ export function createModuleUiPlugin(host) {
         );
     }
 
+    function LabJackPluginSettingsPage({ operation }) {
+        return (
+            <div className="space-y-4">
+                <LjmRuntimePanel operation={operation} />
+            </div>
+        );
+    }
+
     return {
         id: moduleUiPluginMeta.moduleName,
         moduleName: moduleUiPluginMeta.moduleName,
         taskTypes: moduleUiPluginMeta.taskTypes,
         ModuleConfigPage: LabJackModuleConfigPage,
+        PluginSettingsPage: LabJackPluginSettingsPage,
+        SettingsPage: LabJackPluginSettingsPage,
         TaskMetricsGui: LabJackTaskMetricsGui,
         shouldUseTaskMetricsGui: (task) => task.task_type === "labjack.stream",
         TaskSecondaryGui: LabJackTaskSecondaryGui,
