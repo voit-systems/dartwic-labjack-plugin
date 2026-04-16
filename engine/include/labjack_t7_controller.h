@@ -54,6 +54,8 @@ private:
     void upsert(const RapidChannel& channel, DARTWIC::API::ChannelValue value) const;
     void upsertBulk(const RapidChannel& channel, const std::vector<std::pair<double, uint64_t>>& data) const;
     void consoleError(const std::string& title, const std::string& description, std::vector<std::string> channels, const std::string& resolution, int auto_ack = 0) const;
+    void configureStreamChannelFields(const std::vector<StreamMapping>& mappings, double stale_timeout_seconds, const std::string& controller) const;
+    void configureObserveOnlyChannel(const std::string& portal, const std::string& channel, const std::string& controller) const;
 
     void connectionLoopStart();
     void connectionLoop();
@@ -61,6 +63,7 @@ private:
     int connect();
     void disconnect();
     void verifyConnection();
+    void markDisconnectedFromStreamError();
     void handleError(int error_number, const std::string& operation);
 
     std::optional<RapidChannel> parseRapidChannel(const nlohmann::json& value) const;

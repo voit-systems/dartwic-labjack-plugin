@@ -7,12 +7,9 @@ const streamDiagnosticSuffixes = [
     "_stream_target_scan_rate",
     "_stream_scans_per_read",
     "_stream_actual_scan_rate",
-    "_stream_expected_read_rate",
-    "_stream_worker_read_rate",
-    "_stream_last_read_ms",
     "_stream_device_scan_backlog",
     "_stream_ljm_scan_backlog",
-    "_stream_read_number"
+    "_stream_last_read_ms"
 ];
 
 function taskChannel(task, suffix) {
@@ -23,6 +20,11 @@ function readTelemetryValue(liveChannels, channelName, fallback = null) {
     const value = liveChannels?.[channelName]?.channel_data?.value;
     const numericValue = Number(value);
     return Number.isFinite(numericValue) ? numericValue : fallback;
+}
+
+function moduleDeviceConnectedChannel(task) {
+    const instanceName = task.arguments?.module_instance_name;
+    return instanceName ? `${instanceName}/device_connected` : null;
 }
 
 function normalizeMappings(argumentsPayload, convertChannelValuePathToChannelName, isStream) {
@@ -41,14 +43,6 @@ function normalizeMappings(argumentsPayload, convertChannelValuePathToChannelNam
                 : "",
             isStream
         }));
-}
-
-function stateChannelLabel(channel) {
-    if (!channel || !channel.includes("/")) {
-        return "";
-    }
-    const separator = channel.indexOf("/");
-    return `${channel.slice(0, separator)}/${channel.slice(separator + 1)}_state`;
 }
 
 export function createModuleUiPlugin(host) {
@@ -90,25 +84,11 @@ export function createModuleUiPlugin(host) {
             Number(task.arguments?.scans_per_read ?? 10)
         );
         const actualScanRate = readTelemetryValue(liveChannels, taskChannel(task, "_stream_actual_scan_rate"));
-        const expectedReadRate = readTelemetryValue(liveChannels, taskChannel(task, "_stream_expected_read_rate"));
-        const workerReadRate = readTelemetryValue(liveChannels, taskChannel(task, "_stream_worker_read_rate"));
-        const lastReadMs = readTelemetryValue(liveChannels, taskChannel(task, "_stream_last_read_ms"));
-        const deviceScanBacklog = readTelemetryValue(liveChannels, taskChannel(task, "_stream_device_scan_backlog"), 0);
-        const ljmScanBacklog = readTelemetryValue(liveChannels, taskChannel(task, "_stream_ljm_scan_backlog"), 0);
 
         const scanMetrics = [
             ["Target Scan", targetScanRate === null ? "N/A" : `${targetScanRate.toFixed(2)} Hz`],
             ["Scans/Read", scansPerRead === null ? "N/A" : String(scansPerRead)],
             ["Actual Scan", actualScanRate === null ? "N/A" : `${actualScanRate.toFixed(2)} Hz`]
-        ];
-        const workerMetrics = [
-            ["Expected Reads", expectedReadRate === null ? "N/A" : `${expectedReadRate.toFixed(2)} Hz`],
-            ["Worker Reads", workerReadRate === null ? "N/A" : `${workerReadRate.toFixed(2)} Hz`],
-            ["Last Read", lastReadMs === null ? "N/A" : `${lastReadMs.toFixed(2)} ms`]
-        ];
-        const backlogMetrics = [
-            ["Device Backlog", deviceScanBacklog === null ? "N/A" : String(deviceScanBacklog)],
-            ["LJM Backlog", ljmScanBacklog === null ? "N/A" : String(ljmScanBacklog)]
         ];
 
         function renderMetric([label, value]) {
@@ -125,20 +105,17 @@ export function createModuleUiPlugin(host) {
                 <div className="grid grid-cols-3 gap-2">
                     {scanMetrics.map(renderMetric)}
                 </div>
-                <div className="grid grid-cols-3 gap-2">
-                    {workerMetrics.map(renderMetric)}
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                    {backlogMetrics.map(renderMetric)}
-                </div>
             </div>
         );
     }
 
-    function LabJackTaskSecondaryGui({ task }) {
+    function LabJackTaskSecondaryGui({ task, liveChannels }) {
         const args = task.arguments || {};
+        const isStream = task.task_type === "labjack.stream";
         const mappings = normalizeMappings(args, convertChannelValuePathToChannelName, task.task_type === "labjack.stream");
         const instanceName = args.module_instance_name || "UNBOUND";
+        const connectedValue = readTelemetryValue(liveChannels, moduleDeviceConnectedChannel(task), 0);
+        const isConnected = connectedValue !== null && connectedValue !== 0;
         const previewMappings = mappings.slice(0, 3);
         const hiddenMappingCount = Math.max(mappings.length - previewMappings.length, 0);
         const mappingPreview = mappings.length === 0
@@ -146,6 +123,14 @@ export function createModuleUiPlugin(host) {
             : mappings.length === 1
                 ? "1 MAPPING"
                 : `${mappings.length} MAPPINGS`;
+        const lastReadMs = readTelemetryValue(liveChannels, taskChannel(task, "_stream_last_read_ms"), 0);
+        const deviceScanBacklog = readTelemetryValue(liveChannels, taskChannel(task, "_stream_device_scan_backlog"), 0);
+        const ljmScanBacklog = readTelemetryValue(liveChannels, taskChannel(task, "_stream_ljm_scan_backlog"), 0);
+        const streamHealthMetrics = [
+            ["LAST READ", lastReadMs === null ? "N/A" : `${lastReadMs.toFixed(2)} ms`],
+            ["DEVICE BACKLOG", deviceScanBacklog === null ? "N/A" : String(deviceScanBacklog)],
+            ["LJM BACKLOG", ljmScanBacklog === null ? "N/A" : String(ljmScanBacklog)]
+        ];
 
         return (
             <>
@@ -153,13 +138,34 @@ export function createModuleUiPlugin(host) {
                 <div className="grid grid-cols-2 gap-2 text-xs">
                     <div className="min-w-0 rounded-md border bg-muted/40 px-3 py-2">
                         <div className="text-muted-foreground">MODULE</div>
-                        <div className="truncate">{instanceName}</div>
+                        <div className="flex min-w-0 items-center gap-2">
+                            <div className="min-w-0 truncate">{instanceName}</div>
+                            <div
+                                className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium ${
+                                    isConnected
+                                        ? "border border-green-500/40 bg-green-500/15 text-green-500"
+                                        : "border border-red-500/40 bg-red-500/15 text-red-500"
+                                }`}
+                            >
+                                {isConnected ? "CONNECTED" : "DISCONNECTED"}
+                            </div>
+                        </div>
                     </div>
                     <div className="min-w-0 rounded-md border bg-muted/40 px-3 py-2">
                         <div className="text-muted-foreground">MAPPINGS</div>
                         <div className="truncate">{mappingPreview}</div>
                     </div>
                 </div>
+                {isStream ? (
+                    <div className="grid grid-cols-3 gap-2 text-xs">
+                        {streamHealthMetrics.map(([label, value]) => (
+                            <div key={label} className="min-w-0 rounded-md border bg-background/40 px-3 py-2">
+                                <div className="text-muted-foreground">{label}</div>
+                                <div className="truncate">{value}</div>
+                            </div>
+                        ))}
+                    </div>
+                ) : null}
                 <div className="space-y-2">
                     <div className="text-[10px] uppercase text-muted-foreground">Mapping Preview</div>
                     {previewMappings.length > 0 ? (
@@ -209,7 +215,7 @@ export function createModuleUiPlugin(host) {
         return (
             <div
                 className="grid items-center gap-2"
-                style={{ gridTemplateColumns: isStream ? "130px 100px minmax(0, 1fr) auto" : "100px minmax(0, 1fr) minmax(0, 1fr) auto" }}
+                style={{ gridTemplateColumns: isStream ? "130px 100px minmax(0, 1fr) auto" : "100px minmax(0, 1fr) auto" }}
             >
                 {isStream ? (
                     <Select
@@ -245,11 +251,6 @@ export function createModuleUiPlugin(host) {
                     }
                     className="min-w-0 w-full"
                 />
-                {!isStream ? (
-                    <div className="truncate rounded-md border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
-                        {stateChannelLabel(mapping.channel) || "STATE CHANNEL"}
-                    </div>
-                ) : null}
                 <Button variant="ghost" onClick={onRemove} disabled={removeDisabled}>
                     REMOVE
                 </Button>
@@ -508,10 +509,13 @@ export function createModuleUiPlugin(host) {
         shouldUseTaskMetricsGui: (task) => task.task_type === "labjack.stream",
         TaskSecondaryGui: LabJackTaskSecondaryGui,
         TaskDetailGui: LabJackTaskDetailGui,
-        getTaskTelemetryChannels: (task) => (
-            task.task_type === "labjack.stream"
-                ? streamDiagnosticSuffixes.map((suffix) => taskChannel(task, suffix))
-                : []
-        )
+        getTaskTelemetryChannels: (task) => {
+            const deviceConnectedChannel = moduleDeviceConnectedChannel(task);
+            const channels = deviceConnectedChannel ? [deviceConnectedChannel] : [];
+            if (task.task_type === "labjack.stream") {
+                channels.push(...streamDiagnosticSuffixes.map((suffix) => taskChannel(task, suffix)));
+            }
+            return channels;
+        }
     };
 }

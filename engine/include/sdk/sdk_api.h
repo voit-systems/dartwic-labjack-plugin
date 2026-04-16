@@ -31,7 +31,7 @@ namespace DARTWIC::API {
         OFFSET,
         STALE_TIMEOUT,
         MAPPED_CHANNEL,
-        RECORD_ON_VALUE_CHANGE,
+        RECORD_MODE,
         MEAN,
         STDEV,
         BUFFER_SIZE,
@@ -41,7 +41,20 @@ namespace DARTWIC::API {
         ACTIVE_CONTROLLER
     };
 
-    using ChannelValue = std::variant<double, int, std::string, bool>;
+    enum class RecordMode {
+        OnValueChange,
+        Never,
+        EveryValue
+    };
+
+    enum class ControlPolicy {
+        Free,
+        Automatic,
+        ManualOverride,
+        ObserveOnly
+    };
+
+    using ChannelValue = std::variant<double, int, std::string, bool, RecordMode, ControlPolicy>;
 
     struct TaskTypeDefinition;
 
