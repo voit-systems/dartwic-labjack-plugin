@@ -2,6 +2,7 @@
 #define LABJACK_T7_CONTROLLER_H
 
 #include <atomic>
+#include <condition_variable>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -20,7 +21,8 @@ public:
         std::string instance_name,
         std::string device_type,
         std::string connection_type,
-        std::string identifier
+        std::string identifier,
+        std::string ljm_log_mode
     );
     ~LabJackT7Controller();
 
@@ -58,11 +60,15 @@ private:
     void connectionLoopStart();
     void connectionLoop();
     void connectionLoopEnd();
+    bool enterLoopCallback();
+    void leaveLoopCallback();
+    void waitForLoopCallbacks();
     int connect();
     void disconnect();
     void verifyConnection();
     void handleError(int error_number, const std::string& operation);
     bool hasOpenHandle();
+    void abandonHandleAfterDriverFault();
 
     std::optional<RapidChannel> parseRapidChannel(const nlohmann::json& value) const;
     std::optional<RapidChannel> splitRapidChannelPath(const std::string& channel_path) const;
@@ -85,9 +91,15 @@ private:
     std::string device_type_;
     std::string connection_type_;
     std::string identifier_;
+    std::string ljm_log_mode_;
     std::string connection_loop_name_;
     std::atomic_bool demo_mode_{false};
     std::atomic_bool connected_{false};
+    std::atomic_bool driver_faulted_{false};
+    bool shutting_down_ = false;
+    int active_loop_callbacks_ = 0;
+    std::mutex loop_callback_mutex_;
+    std::condition_variable loop_callback_idle_;
     std::mutex handle_mutex_;
     std::mutex stream_mutex_;
     std::string active_stream_task_key_;

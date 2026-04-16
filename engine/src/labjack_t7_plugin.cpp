@@ -2,11 +2,77 @@
 
 #include "labjack_t7_controller.h"
 
+#include <exception>
+#include <iostream>
+
+#ifdef _WIN32
+    #define WIN32_LEAN_AND_MEAN
+    #include <windows.h>
+    #include <eh.h>
+#endif
+
 #ifdef _WIN32
     #define EXPORT_API __declspec(dllexport)
 #else
     #define EXPORT_API __attribute__((visibility("default")))
 #endif
+
+namespace {
+#ifdef _WIN32
+    class StructuredException final : public std::exception {
+    public:
+        StructuredException(unsigned int code, void* address)
+            : code_(code), address_(address) {}
+
+        const char* what() const noexcept override {
+            return "structured exception";
+        }
+
+        unsigned int code() const noexcept {
+            return code_;
+        }
+
+        void* address() const noexcept {
+            return address_;
+        }
+
+    private:
+        unsigned int code_ = 0;
+        void* address_ = nullptr;
+    };
+
+    void translateStructuredException(unsigned int code, _EXCEPTION_POINTERS* info) {
+        void* address = nullptr;
+        if (info && info->ExceptionRecord) {
+            address = info->ExceptionRecord->ExceptionAddress;
+        }
+        throw StructuredException(code, address);
+    }
+#endif
+
+    template <typename Callback>
+    void runGuarded(const char* operation, Callback&& callback) {
+#ifdef _WIN32
+        const auto previous_translator = _set_se_translator(translateStructuredException);
+#endif
+        try {
+            callback();
+        } catch (const StructuredException& error) {
+            std::cerr
+                << "LabJack T7 guarded task exited operation=" << operation
+                << " error=structured exception code=0x" << std::hex << error.code() << std::dec
+                << " address=" << error.address()
+                << std::endl;
+        } catch (const std::exception& error) {
+            std::cerr << "LabJack T7 guarded task exited operation=" << operation << " error=" << error.what() << std::endl;
+        } catch (...) {
+            std::cerr << "LabJack T7 guarded task exited operation=" << operation << " error=unknown" << std::endl;
+        }
+#ifdef _WIN32
+        _set_se_translator(previous_translator);
+#endif
+    }
+}
 
 void LabJackT7Plugin::onPluginLoaded() {
     DARTWIC::API::TaskTypeDefinition digital_write_task;
@@ -25,13 +91,15 @@ void LabJackT7Plugin::onPluginLoaded() {
         })}
     };
     digital_write_task.on_task = [this](const DARTWIC::API::TaskTypeDefinition&, DARTWIC::API::TaskRuntime& task_runtime, double) {
-        const std::string instance_name = task_runtime.getArguments().value("module_instance_name", std::string{});
-        auto module = dartwic->getModuleInstance(instance_name);
-        auto labjack_module = std::dynamic_pointer_cast<LabJackT7Module>(module);
-        if (!labjack_module) {
-            return;
-        }
-        labjack_module->controller().applyDigitalWrite(task_runtime.getArguments());
+        runGuarded("digital_write", [&]() {
+            const std::string instance_name = task_runtime.getArguments().value("module_instance_name", std::string{});
+            auto module = dartwic->getModuleInstance(instance_name);
+            auto labjack_module = std::dynamic_pointer_cast<LabJackT7Module>(module);
+            if (!labjack_module) {
+                return;
+            }
+            labjack_module->controller().applyDigitalWrite(task_runtime.getArguments());
+        });
     };
     digital_write_task.cleanup = [](DARTWIC::API::TaskRuntime&) {};
     dartwic->registerTaskType(digital_write_task);
@@ -55,21 +123,25 @@ void LabJackT7Plugin::onPluginLoaded() {
         })}
     };
     stream_task.on_task = [this](const DARTWIC::API::TaskTypeDefinition&, DARTWIC::API::TaskRuntime& task_runtime, double) {
-        const std::string instance_name = task_runtime.getArguments().value("module_instance_name", std::string{});
-        auto module = dartwic->getModuleInstance(instance_name);
-        auto labjack_module = std::dynamic_pointer_cast<LabJackT7Module>(module);
-        if (!labjack_module) {
-            return;
-        }
-        labjack_module->controller().runStreamWorker(task_runtime);
+        runGuarded("stream_worker", [&]() {
+            const std::string instance_name = task_runtime.getArguments().value("module_instance_name", std::string{});
+            auto module = dartwic->getModuleInstance(instance_name);
+            auto labjack_module = std::dynamic_pointer_cast<LabJackT7Module>(module);
+            if (!labjack_module) {
+                return;
+            }
+            labjack_module->controller().runStreamWorker(task_runtime);
+        });
     };
     stream_task.on_end = [this](const DARTWIC::API::TaskTypeDefinition&, DARTWIC::API::TaskRuntime& task_runtime) {
-        const std::string instance_name = task_runtime.getArguments().value("module_instance_name", std::string{});
-        auto module = dartwic->getModuleInstance(instance_name);
-        auto labjack_module = std::dynamic_pointer_cast<LabJackT7Module>(module);
-        if (labjack_module) {
-            labjack_module->controller().stopStream(task_runtime);
-        }
+        runGuarded("stream_stop", [&]() {
+            const std::string instance_name = task_runtime.getArguments().value("module_instance_name", std::string{});
+            auto module = dartwic->getModuleInstance(instance_name);
+            auto labjack_module = std::dynamic_pointer_cast<LabJackT7Module>(module);
+            if (labjack_module) {
+                labjack_module->controller().stopStream(task_runtime);
+            }
+        });
     };
     stream_task.cleanup = [](DARTWIC::API::TaskRuntime&) {};
     dartwic->registerTaskType(stream_task);

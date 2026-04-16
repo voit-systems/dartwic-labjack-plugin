@@ -5,11 +5,16 @@
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <random>
 #include <sstream>
 #include <thread>
+
+#ifdef _WIN32
+    #include <excpt.h>
+#endif
 
 using DARTWIC::API::ChannelField;
 using DARTWIC::API::ChannelValue;
@@ -19,6 +24,38 @@ using DARTWIC::API::RecordMode;
 namespace {
     constexpr int LJM_DEVICE_STREAM_IS_ACTIVE = 2605;
     constexpr int LJM_DEVICE_STREAM_NOT_RUNNING = 2620;
+    constexpr double LJM_LOG_FILE_MAX_SIZE_CHARS = 50.0 * 1024.0 * 1024.0;
+
+    int parseLjmLogMode(const std::string& mode);
+
+    std::string defaultLjmLogPath() {
+#ifdef _WIN32
+        const char* temp = std::getenv("TEMP");
+        if (temp && temp[0] != '\0') {
+            return std::string(temp) + "\\dartwic-labjack-ljm.log";
+        }
+#endif
+        return "dartwic-labjack-ljm.log";
+    }
+
+    void configureLjmDebugLogging(const std::string& mode) {
+        static bool configured = false;
+        if (configured) {
+            return;
+        }
+        configured = true;
+
+        const auto log_path = defaultLjmLogPath();
+        LJM_WriteLibraryConfigStringS(LJM_DEBUG_LOG_FILE, log_path.c_str());
+        LJM_WriteLibraryConfigS(LJM_DEBUG_LOG_FILE_MAX_SIZE, LJM_LOG_FILE_MAX_SIZE_CHARS);
+        LJM_WriteLibraryConfigS(LJM_DEBUG_LOG_BUFFER_MAX_SIZE, 20000);
+        LJM_WriteLibraryConfigS(LJM_DEBUG_LOG_SLEEP_TIME_MS, 100);
+        LJM_WriteLibraryConfigS(LJM_DEBUG_LOG_LEVEL, LJM_TRACE);
+        LJM_WriteLibraryConfigS(LJM_DEBUG_LOG_MODE, parseLjmLogMode(mode));
+        LJM_ResetLog();
+
+        std::cerr << "LabJack T7 LJM debug log enabled path=" << log_path << " mode=" << mode << std::endl;
+    }
 
     std::string taskKey(DARTWIC::API::TaskRuntime& task_runtime) {
         return task_runtime.getPortalName() + "/" + task_runtime.getTaskName();
@@ -43,6 +80,17 @@ namespace {
             return static_cast<char>(std::toupper(ch));
         });
         return value;
+    }
+
+    int parseLjmLogMode(const std::string& mode) {
+        auto normalized = trimAndUpper(mode);
+        if (normalized == "CONTINUOUS") {
+            return LJM_DEBUG_LOG_MODE_CONTINUOUS;
+        }
+        if (normalized == "NEVER" || normalized == "OFF" || normalized == "DISABLED") {
+            return LJM_DEBUG_LOG_MODE_NEVER;
+        }
+        return LJM_DEBUG_LOG_MODE_ON_ERROR;
     }
 
     bool isDemoModeToken(const std::string& value) {
@@ -72,6 +120,77 @@ namespace {
             errorTextContains(error_number, "STREAM_NOT_RUNNING") ||
             errorTextContains(error_number, "not running");
     }
+
+    bool isFatalStreamDriverError(int error_number) {
+        return error_number == LJME_UNKNOWN_ERROR;
+    }
+
+#ifdef _WIN32
+    int ljmCallExceptionFilter(const char* operation, unsigned int exception_code) {
+        std::cerr
+            << "LabJack T7 LJM exception "
+            << "operation=" << operation
+            << " code=0x" << std::hex << exception_code << std::dec
+            << std::endl;
+        return EXCEPTION_EXECUTE_HANDLER;
+    }
+#endif
+
+    int safeLjmStreamStart(int handle, int scans_per_read, int num_addresses, int* addresses, double* scan_rate) {
+#ifdef _WIN32
+        int error = LJME_UNKNOWN_ERROR;
+        __try {
+            error = LJM_eStreamStart(handle, scans_per_read, num_addresses, addresses, scan_rate);
+        } __except (ljmCallExceptionFilter("LJM_eStreamStart", GetExceptionCode())) {
+            error = LJME_UNKNOWN_ERROR;
+        }
+        return error;
+#else
+        return LJM_eStreamStart(handle, scans_per_read, num_addresses, addresses, scan_rate);
+#endif
+    }
+
+    int safeLjmStreamRead(int handle, double* data, int* device_backlog, int* ljm_backlog) {
+#ifdef _WIN32
+        int error = LJME_UNKNOWN_ERROR;
+        __try {
+            error = LJM_eStreamRead(handle, data, device_backlog, ljm_backlog);
+        } __except (ljmCallExceptionFilter("LJM_eStreamRead", GetExceptionCode())) {
+            error = LJME_UNKNOWN_ERROR;
+        }
+        return error;
+#else
+        return LJM_eStreamRead(handle, data, device_backlog, ljm_backlog);
+#endif
+    }
+
+    int safeLjmStreamStop(int handle) {
+#ifdef _WIN32
+        int error = LJME_UNKNOWN_ERROR;
+        __try {
+            error = LJM_eStreamStop(handle);
+        } __except (ljmCallExceptionFilter("LJM_eStreamStop", GetExceptionCode())) {
+            error = LJME_UNKNOWN_ERROR;
+        }
+        return error;
+#else
+        return LJM_eStreamStop(handle);
+#endif
+    }
+
+    int safeLjmClose(int handle) {
+#ifdef _WIN32
+        int error = LJME_UNKNOWN_ERROR;
+        __try {
+            error = LJM_Close(handle);
+        } __except (ljmCallExceptionFilter("LJM_Close", GetExceptionCode())) {
+            error = LJME_UNKNOWN_ERROR;
+        }
+        return error;
+#else
+        return LJM_Close(handle);
+#endif
+    }
 }
 
 LabJackT7Controller::LabJackT7Controller(
@@ -79,20 +198,47 @@ LabJackT7Controller::LabJackT7Controller(
     std::string instance_name,
     std::string device_type,
     std::string connection_type,
-    std::string identifier
+    std::string identifier,
+    std::string ljm_log_mode
 ) : module_(module),
     instance_name_(std::move(instance_name)),
     device_type_(std::move(device_type)),
     connection_type_(std::move(connection_type)),
     identifier_(std::move(identifier)),
+    ljm_log_mode_(std::move(ljm_log_mode)),
     connection_loop_name_("labjack_t7_connection_" + instance_name_) {
-    module_->dartwic->onStart(connection_loop_name_, [this]() { connectionLoopStart(); });
-    module_->dartwic->onLoop(connection_loop_name_, [this]() { connectionLoop(); });
-    module_->dartwic->onEnd(connection_loop_name_, [this]() { connectionLoopEnd(); });
+    configureLjmDebugLogging(ljm_log_mode_);
+
+    module_->dartwic->onStart(connection_loop_name_, [this]() {
+        if (!enterLoopCallback()) {
+            return;
+        }
+        connectionLoopStart();
+        leaveLoopCallback();
+    });
+    module_->dartwic->onLoop(connection_loop_name_, [this]() {
+        if (!enterLoopCallback()) {
+            return;
+        }
+        connectionLoop();
+        leaveLoopCallback();
+    });
+    module_->dartwic->onEnd(connection_loop_name_, [this]() {
+        if (!enterLoopCallback()) {
+            return;
+        }
+        connectionLoopEnd();
+        leaveLoopCallback();
+    });
 }
 
 LabJackT7Controller::~LabJackT7Controller() {
+    {
+        std::lock_guard<std::mutex> lock(loop_callback_mutex_);
+        shutting_down_ = true;
+    }
     module_->dartwic->removeLoop(connection_loop_name_);
+    waitForLoopCallbacks();
     stopStream();
     disconnect();
 }
@@ -138,6 +284,13 @@ void LabJackT7Controller::connectionLoopStart() {
 }
 
 void LabJackT7Controller::connectionLoop() {
+    if (driver_faulted_.load()) {
+        connected_ = false;
+        upsert("device_connected", 0.0);
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        return;
+    }
+
     if (!hasOpenHandle()) {
         const int error = connect();
         if (error != LJME_NOERROR) {
@@ -163,7 +316,40 @@ void LabJackT7Controller::connectionLoopEnd() {
     disconnect();
 }
 
+bool LabJackT7Controller::enterLoopCallback() {
+    std::lock_guard<std::mutex> lock(loop_callback_mutex_);
+    if (shutting_down_) {
+        return false;
+    }
+
+    ++active_loop_callbacks_;
+    return true;
+}
+
+void LabJackT7Controller::leaveLoopCallback() {
+    std::lock_guard<std::mutex> lock(loop_callback_mutex_);
+    if (active_loop_callbacks_ > 0) {
+        --active_loop_callbacks_;
+    }
+    if (active_loop_callbacks_ == 0) {
+        loop_callback_idle_.notify_all();
+    }
+}
+
+void LabJackT7Controller::waitForLoopCallbacks() {
+    std::unique_lock<std::mutex> lock(loop_callback_mutex_);
+    loop_callback_idle_.wait(lock, [this]() {
+        return active_loop_callbacks_ == 0;
+    });
+}
+
 int LabJackT7Controller::connect() {
+    if (driver_faulted_.load()) {
+        connected_ = false;
+        upsert("device_connected", 0.0);
+        return LJME_UNKNOWN_ERROR;
+    }
+
     std::lock_guard<std::mutex> lock(handle_mutex_);
     if (handle_ != -1) {
         connected_ = true;
@@ -194,22 +380,47 @@ int LabJackT7Controller::connect() {
 }
 
 void LabJackT7Controller::disconnect() {
-    std::lock_guard<std::mutex> lock(handle_mutex_);
-    if (handle_ != -1) {
-        const int stop_error = LJM_eStreamStop(handle_);
-        if (!isHarmlessStreamStopError(stop_error)) {
-            handleError(stop_error, "stream_stop");
+    if (driver_faulted_.load()) {
+        {
+            std::lock_guard<std::mutex> lock(handle_mutex_);
+            handle_ = -1;
         }
-        LJM_Close(handle_);
-        handle_ = -1;
+        connected_ = false;
+        upsert("device_connected", 0.0);
+        return;
     }
+
+    int stop_error = LJME_NOERROR;
+    {
+        std::lock_guard<std::mutex> lock(handle_mutex_);
+        if (handle_ != -1) {
+            stop_error = safeLjmStreamStop(handle_);
+            safeLjmClose(handle_);
+            handle_ = -1;
+        }
+    }
+
     connected_ = false;
     upsert("device_connected", 0.0);
+
+    if (!isHarmlessStreamStopError(stop_error)) {
+        handleError(stop_error, "stream_stop");
+    }
 }
 
 bool LabJackT7Controller::hasOpenHandle() {
     std::lock_guard<std::mutex> lock(handle_mutex_);
     return handle_ != -1;
+}
+
+void LabJackT7Controller::abandonHandleAfterDriverFault() {
+    driver_faulted_ = true;
+    {
+        std::lock_guard<std::mutex> lock(handle_mutex_);
+        handle_ = -1;
+    }
+    connected_ = false;
+    upsert("device_connected", 0.0);
 }
 
 void LabJackT7Controller::verifyConnection() {
@@ -241,7 +452,7 @@ void LabJackT7Controller::verifyConnection() {
     {
         std::lock_guard<std::mutex> lock(handle_mutex_);
         if (handle_ != -1) {
-            LJM_Close(handle_);
+            safeLjmClose(handle_);
             handle_ = -1;
         }
     }
@@ -251,6 +462,17 @@ void LabJackT7Controller::verifyConnection() {
 void LabJackT7Controller::handleError(int error_number, const std::string& operation) {
     char error_string[LJM_MAX_NAME_SIZE] = "LJM error not found.";
     LJM_ErrorToString(error_number, error_string);
+
+    if (operation.rfind("stream_", 0) == 0) {
+        std::cerr
+            << "LabJack T7 Error [" << instance_name_ << "] "
+            << "operation=" << operation
+            << " error=" << error_number
+            << " message=" << error_string
+            << std::endl;
+        return;
+    }
+
     consoleError(
         "LabJack T7 Error [" + instance_name_ + "]",
         "LabJack operation failed.\n[Operation: " + operation + "]\n[LJM Error: " + std::string(error_string) + "]",
@@ -385,15 +607,20 @@ void LabJackT7Controller::configureStreamChannelFields(
 }
 
 void LabJackT7Controller::markDisconnectedFromStreamError() {
-    std::lock_guard<std::mutex> lock(handle_mutex_);
-    if (handle_ != -1) {
-        const int stop_error = LJM_eStreamStop(handle_);
-        if (!isHarmlessStreamStopError(stop_error)) {
-            handleError(stop_error, "stream_stop_after_error");
+    int stop_error = LJME_NOERROR;
+    {
+        std::lock_guard<std::mutex> lock(handle_mutex_);
+        if (handle_ != -1) {
+            stop_error = safeLjmStreamStop(handle_);
         }
     }
+
     connected_ = false;
     upsert("device_connected", 0.0);
+
+    if (!isHarmlessStreamStopError(stop_error)) {
+        handleError(stop_error, "stream_stop_after_error");
+    }
 }
 
 bool LabJackT7Controller::tryAcquireStream(const std::string& task_key) {
@@ -558,7 +785,8 @@ void LabJackT7Controller::runStreamWorker(DARTWIC::API::TaskRuntime& task_runtim
                     if (handle_ == -1) {
                         error = -1;
                     } else {
-                        error = LJM_eStreamStart(
+                        safeLjmStreamStop(handle_);
+                        error = safeLjmStreamStart(
                             handle_,
                             scans_per_read,
                             static_cast<int>(addresses.size()),
@@ -566,12 +794,12 @@ void LabJackT7Controller::runStreamWorker(DARTWIC::API::TaskRuntime& task_runtim
                             &requested_scan_rate
                         );
                         if (isStreamAlreadyStartedError(error)) {
-                            const int stop_error = LJM_eStreamStop(handle_);
+                            const int stop_error = safeLjmStreamStop(handle_);
                             if (!isHarmlessStreamStopError(stop_error)) {
                                 error = stop_error;
                             } else {
                                 requested_scan_rate = scan_rate;
-                                error = LJM_eStreamStart(
+                                error = safeLjmStreamStart(
                                     handle_,
                                     scans_per_read,
                                     static_cast<int>(addresses.size()),
@@ -587,6 +815,10 @@ void LabJackT7Controller::runStreamWorker(DARTWIC::API::TaskRuntime& task_runtim
                 publishTaskDiagnostic(task_runtime, "_stream_last_read_ms", std::chrono::duration<double, std::milli>(now - last_successful_read).count());
                 if (error != LJME_NOERROR) {
                     handleError(error, "stream_start");
+                    if (isFatalStreamDriverError(error)) {
+                        abandonHandleAfterDriverFault();
+                        break;
+                    }
                     markDisconnectedFromStreamError();
                     std::this_thread::sleep_for(std::chrono::seconds(1));
                     continue;
@@ -616,13 +848,18 @@ void LabJackT7Controller::runStreamWorker(DARTWIC::API::TaskRuntime& task_runtim
             if (handle_ == -1) {
                 error = -1;
             } else {
-                error = LJM_eStreamRead(handle_, data.data(), &device_backlog, &ljm_backlog);
+                error = safeLjmStreamRead(handle_, data.data(), &device_backlog, &ljm_backlog);
             }
         }
         const auto read_end = std::chrono::steady_clock::now();
 
         if (error != LJME_NOERROR) {
             handleError(error, "stream_read");
+            if (isFatalStreamDriverError(error)) {
+                stream_started = false;
+                abandonHandleAfterDriverFault();
+                break;
+            }
             stream_started = false;
             markDisconnectedFromStreamError();
             std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -670,7 +907,7 @@ void LabJackT7Controller::runStreamWorker(DARTWIC::API::TaskRuntime& task_runtim
     if (stream_started && !demo_mode_) {
         std::lock_guard<std::mutex> handle_lock(handle_mutex_);
         if (handle_ != -1) {
-            const int error = LJM_eStreamStop(handle_);
+            const int error = safeLjmStreamStop(handle_);
             if (!isHarmlessStreamStopError(error)) {
                 handleError(error, "stream_stop");
             }
@@ -715,7 +952,7 @@ void LabJackT7Controller::stopStreamTaskKey(const std::string& task_key) {
     if (!demo_mode_) {
         std::lock_guard<std::mutex> handle_lock(handle_mutex_);
         if (handle_ != -1) {
-            const int error = LJM_eStreamStop(handle_);
+            const int error = safeLjmStreamStop(handle_);
             if (!isHarmlessStreamStopError(error)) {
                 handleError(error, "stream_stop");
             }

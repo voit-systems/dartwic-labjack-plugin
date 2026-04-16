@@ -1,5 +1,6 @@
 {
   "device_type": "T7",
   "connection_type": "ANY",
-  "identifier": "ANY"
+  "identifier": "ANY",
+  "ljm_log_mode": "on_error"
 }
