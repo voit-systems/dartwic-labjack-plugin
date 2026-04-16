@@ -92,8 +92,9 @@ LabJackT7Controller::LabJackT7Controller(
 }
 
 LabJackT7Controller::~LabJackT7Controller() {
-    stopStream();
     module_->dartwic->removeLoop(connection_loop_name_);
+    stopStream();
+    disconnect();
 }
 
 bool LabJackT7Controller::isConnected() const {
@@ -137,11 +138,18 @@ void LabJackT7Controller::connectionLoopStart() {
 }
 
 void LabJackT7Controller::connectionLoop() {
-    if (handle_ == -1) {
+    if (!hasOpenHandle()) {
         const int error = connect();
         if (error != LJME_NOERROR) {
             handleError(error, "connect");
         }
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        return;
+    }
+
+    if (hasActiveStream()) {
+        connected_ = true;
+        upsert("device_connected", 1.0);
         std::this_thread::sleep_for(std::chrono::seconds(1));
         return;
     }
@@ -188,11 +196,20 @@ int LabJackT7Controller::connect() {
 void LabJackT7Controller::disconnect() {
     std::lock_guard<std::mutex> lock(handle_mutex_);
     if (handle_ != -1) {
+        const int stop_error = LJM_eStreamStop(handle_);
+        if (!isHarmlessStreamStopError(stop_error)) {
+            handleError(stop_error, "stream_stop");
+        }
         LJM_Close(handle_);
         handle_ = -1;
     }
     connected_ = false;
     upsert("device_connected", 0.0);
+}
+
+bool LabJackT7Controller::hasOpenHandle() {
+    std::lock_guard<std::mutex> lock(handle_mutex_);
+    return handle_ != -1;
 }
 
 void LabJackT7Controller::verifyConnection() {
@@ -370,8 +387,10 @@ void LabJackT7Controller::configureStreamChannelFields(
 void LabJackT7Controller::markDisconnectedFromStreamError() {
     std::lock_guard<std::mutex> lock(handle_mutex_);
     if (handle_ != -1) {
-        LJM_Close(handle_);
-        handle_ = -1;
+        const int stop_error = LJM_eStreamStop(handle_);
+        if (!isHarmlessStreamStopError(stop_error)) {
+            handleError(stop_error, "stream_stop_after_error");
+        }
     }
     connected_ = false;
     upsert("device_connected", 0.0);
@@ -385,6 +404,11 @@ bool LabJackT7Controller::tryAcquireStream(const std::string& task_key) {
 
     active_stream_task_key_ = task_key;
     return true;
+}
+
+bool LabJackT7Controller::hasActiveStream() {
+    std::lock_guard<std::mutex> lock(stream_mutex_);
+    return !active_stream_task_key_.empty();
 }
 
 void LabJackT7Controller::releaseStream(const std::string& task_key) {

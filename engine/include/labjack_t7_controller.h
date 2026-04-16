@@ -62,6 +62,7 @@ private:
     void disconnect();
     void verifyConnection();
     void handleError(int error_number, const std::string& operation);
+    bool hasOpenHandle();
 
     std::optional<RapidChannel> parseRapidChannel(const nlohmann::json& value) const;
     std::optional<RapidChannel> splitRapidChannelPath(const std::string& channel_path) const;
@@ -74,6 +75,7 @@ private:
     void configureStreamChannelFields(const std::vector<StreamMapping>& mappings, double stale_timeout_seconds, const std::string& controller) const;
     void markDisconnectedFromStreamError();
     bool tryAcquireStream(const std::string& task_key);
+    bool hasActiveStream();
     void releaseStream(const std::string& task_key);
     void stopStreamTaskKey(const std::string& task_key);
     uint64_t unixNanosecondsNow() const;

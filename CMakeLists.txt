@@ -97,5 +97,6 @@ if(SHOULD_COPY_PLUGIN AND NOT "${EXTERNAL_ENGINE_ROOT}" STREQUAL "")
             COMMAND ${CMAKE_COMMAND} -E copy_if_different "${ENGINE_PLUGIN_DIR}/module_config.json" "${EXTERNAL_ENGINE_PLUGIN_DIR}/module_config.json"
             COMMAND ${CMAKE_COMMAND} -E copy_if_different "${ENGINE_PLUGIN_DIR}/default_parameters.json" "${EXTERNAL_ENGINE_PLUGIN_DIR}/default_parameters.json"
             COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:labjack_t7>" "${EXTERNAL_ENGINE_PLUGIN_DIR}/bin/$<TARGET_FILE_NAME:labjack_t7>"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_PDB_FILE:labjack_t7>" "${EXTERNAL_ENGINE_PLUGIN_DIR}/bin/$<TARGET_PDB_FILE_NAME:labjack_t7>"
             COMMENT "Copying engine plugin to external DARTWIC engine plugins directory")
 endif()
