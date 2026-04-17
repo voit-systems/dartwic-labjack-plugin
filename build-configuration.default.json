@@ -1,5 +1,5 @@
 {
-  "copy_plugin": true,
+  "copy_plugin": false,
   "engine_dir": "C:\\Users\\kempt\\OneDrive\\Desktop\\dartwic-test-1.0\\engine-desktop-1.0.0-pre_release-win64",
   "interface_dir": "C:\\Users\\kempt\\OneDrive\\Desktop\\dartwic-test-1.0\\interface-desktop-1.0.0-pre_release-win64"
 }
