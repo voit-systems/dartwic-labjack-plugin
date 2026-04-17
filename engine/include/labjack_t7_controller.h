@@ -50,6 +50,7 @@ private:
         std::string labjack_name;
         RapidChannel source;
         RapidChannel state;
+        int register_number = 0;
     };
 
     double query(const std::string& channel, double default_value = 0.0) const;

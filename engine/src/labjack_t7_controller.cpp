@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <cstdint>
 #include <cmath>
 #include <cstring>
 #include <iostream>
@@ -511,12 +512,17 @@ std::vector<LabJackT7Controller::DigitalWriteMapping> LabJackT7Controller::parse
     }
 
     for (const auto& mapping : arguments["mappings"]) {
-        if (!mapping.is_object() || !mapping.contains("channel")) {
+        if (!mapping.is_object() || !mapping.contains("channel") || !mapping.contains("register") || !isIntegerJson(mapping["register"])) {
             continue;
         }
 
         auto source = parseRapidChannel(mapping["channel"]);
         if (!source.has_value()) {
+            continue;
+        }
+
+        const int register_number = mapping["register"].get<int>();
+        if (register_number < 0 || register_number > 22) {
             continue;
         }
 
@@ -526,7 +532,8 @@ std::vector<LabJackT7Controller::DigitalWriteMapping> LabJackT7Controller::parse
             .state = RapidChannel{
                 .portal = source->portal,
                 .channel = stateChannelName(source->channel)
-            }
+            },
+            .register_number = register_number
         });
     }
 
@@ -630,13 +637,15 @@ void LabJackT7Controller::applyDigitalWrite(const nlohmann::json& arguments) {
             continue;
         }
 
-        double readback = 0.0;
-        error = LJM_eReadName(handle_, mapping.labjack_name.c_str(), &readback);
+        double dio_state = 0.0;
+        error = LJM_eReadName(handle_, "DIO_STATE", &dio_state);
         if (error != LJME_NOERROR) {
-            handleError(error, "digital_readback:" + mapping.labjack_name);
+            handleError(error, "digital_readback:DIO_STATE");
             continue;
         }
 
+        const auto dio_state_bits = static_cast<std::uint32_t>(dio_state);
+        const double readback = (dio_state_bits & (std::uint32_t{1} << mapping.register_number)) != 0 ? 1.0 : 0.0;
         upsert(mapping.state, readback);
     }
 }
